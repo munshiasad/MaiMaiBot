@@ -1,6 +1,6 @@
 require("dotenv").config();
 
-const { Telegraf } = require("telegraf");
+const { Telegraf, Markup } = require("telegraf");
 const { MCPClient } = require("./mcpClient");
 const { TTLCache } = require("./cache");
 const { getUser, upsertUser, deleteUser, allUsers } = require("./storage");
@@ -30,6 +30,31 @@ const AUTO_CLAIM_TIMEZONE = process.env.AUTO_CLAIM_TIMEZONE || "Asia/Shanghai";
 const cache = new TTLCache(CACHE_TTL_SECONDS * 1000);
 const bot = new Telegraf(BOT_TOKEN);
 let autoClaimInterval = null;
+
+const TOKEN_GUIDE_MESSAGE = [
+  "先获取麦当劳 MCP Token：",
+  "1) 打开 https://open.mcd.cn/mcp/doc",
+  "2) 右上角登录（手机号验证）",
+  "3) 登录后点击“控制台”，点击激活申请 MCP Token",
+  "4) 同意协议后复制 Token"
+].join("\n");
+
+const ACCOUNT_HELP_MESSAGE = [
+  "账号管理：",
+  "/account add 名称 Token - 添加或更新账号",
+  "/account use 名称 - 切换账号",
+  "/account list - 查看账号",
+  "/account del 名称 - 删除账号",
+  "提示：名称不要包含空格"
+].join("\n");
+
+const MAIN_MENU = Markup.inlineKeyboard([
+  [Markup.button.callback("活动日历（本月）", "menu_calendar"), Markup.button.callback("当前时间", "menu_time")],
+  [Markup.button.callback("可领优惠券", "menu_available"), Markup.button.callback("一键领券", "menu_claim")],
+  [Markup.button.callback("我的优惠券", "menu_mycoupons"), Markup.button.callback("账号状态", "menu_status")],
+  [Markup.button.callback("开启自动领券", "menu_autoclaim_on"), Markup.button.callback("关闭自动领券", "menu_autoclaim_off")],
+  [Markup.button.callback("账号管理", "menu_accounts"), Markup.button.callback("Token 获取指引", "menu_token_help")]
+]);
 
 function chunkText(text, maxLength = 3500) {
   const lines = text.split("\n");
@@ -202,20 +227,141 @@ function escapeHtml(text) {
     .replace(/\"/g, "&quot;");
 }
 
-function ensureToken(ctx) {
-  const userId = String(ctx.from.id);
-  const user = getUser(userId);
-  if (!user || !user.token) {
-    ctx.reply("请先使用 /token 设置 MCP Token。");
-    return null;
-  }
-  return user;
+function parseCommandArgs(ctx) {
+  const text = ctx.message && ctx.message.text ? ctx.message.text : "";
+  return text.split(/\s+/).slice(1).filter(Boolean);
 }
 
-async function callToolForUser(userId, toolName, args) {
+function getAccountDisplayName(accountId, account) {
+  if (account && account.label) {
+    return account.label;
+  }
+  if (accountId === "default") {
+    return "默认账号";
+  }
+  return accountId;
+}
+
+function buildAccountListText(user) {
+  const entries = user && user.accounts ? Object.entries(user.accounts) : [];
+  if (entries.length === 0) {
+    return "暂无账号，请先使用 /account add 添加账号。";
+  }
+  const lines = entries.map(([accountId, account]) => {
+    const name = getAccountDisplayName(accountId, account);
+    const active = user.activeAccountId === accountId ? "✅" : "▫️";
+    const autoClaim = account.autoClaimEnabled ? "开" : "关";
+    const report = account.autoClaimReport ? "开" : "关";
+    const nameWithId = name === accountId ? name : `${name}（${accountId}）`;
+    return `${active} ${nameWithId} ｜自动领券:${autoClaim} ｜汇报:${report}`;
+  });
+  return lines.join("\n");
+}
+
+function resolveAccount(userId, accountId) {
   const user = getUser(userId);
-  if (!user || !user.token) {
-    throw new Error("缺少 MCP Token，请先使用 /token 设置。");
+  if (!user || !user.accounts || Object.keys(user.accounts).length === 0) {
+    return { error: "no_accounts" };
+  }
+
+  let resolvedId = accountId;
+  if (resolvedId) {
+    if (!user.accounts[resolvedId]) {
+      return { error: "account_not_found", user };
+    }
+  } else {
+    resolvedId = user.activeAccountId;
+    if (!resolvedId || !user.accounts[resolvedId]) {
+      const firstId = Object.keys(user.accounts)[0];
+      if (firstId) {
+        resolvedId = firstId;
+        if (user.activeAccountId !== firstId) {
+          upsertUser(userId, { activeAccountId: firstId });
+        }
+      }
+    }
+  }
+
+  if (!resolvedId || !user.accounts[resolvedId]) {
+    return { error: "account_not_found", user };
+  }
+
+  const account = user.accounts[resolvedId];
+  if (!account || !account.token) {
+    return { error: "missing_token", user, accountId: resolvedId };
+  }
+
+  return { user, accountId: resolvedId, account };
+}
+
+function ensureAccount(ctx, accountId) {
+  const userId = String(ctx.from.id);
+  const info = resolveAccount(userId, accountId);
+
+  if (info.error === "no_accounts") {
+    ctx.reply("还没有添加账号，请先使用 /token 或 /account add 添加 MCP Token。");
+    return null;
+  }
+  if (info.error === "account_not_found") {
+    ctx.reply(`账号不存在：${accountId}`);
+    return null;
+  }
+  if (info.error === "missing_token") {
+    const name = getAccountDisplayName(info.accountId, info.user.accounts[info.accountId]);
+    ctx.reply(`账号 ${name} 未设置 Token，请重新设置。`);
+    return null;
+  }
+
+  return { ...info, userId, displayName: getAccountDisplayName(info.accountId, info.account) };
+}
+
+function addOrUpdateAccount(userId, accountId, token, label) {
+  const user = getUser(userId) || {};
+  const accounts = { ...(user.accounts || {}) };
+  const existing = accounts[accountId] || {};
+  const updated = {
+    ...existing,
+    token,
+    label: label || existing.label || accountId,
+    autoClaimEnabled: typeof existing.autoClaimEnabled === "boolean" ? existing.autoClaimEnabled : false,
+    autoClaimReport: typeof existing.autoClaimReport === "boolean" ? existing.autoClaimReport : true
+  };
+
+  accounts[accountId] = updated;
+  const activeAccountId = user.activeAccountId || accountId;
+  upsertUser(userId, { accounts, activeAccountId });
+  return existing && existing.token;
+}
+
+function updateAccount(userId, accountId, updates) {
+  const user = getUser(userId);
+  if (!user || !user.accounts || !user.accounts[accountId]) {
+    return false;
+  }
+  const accounts = { ...user.accounts };
+  accounts[accountId] = { ...accounts[accountId], ...updates };
+  upsertUser(userId, { accounts });
+  return true;
+}
+
+function removeAccount(userId, accountId) {
+  const user = getUser(userId);
+  if (!user || !user.accounts || !user.accounts[accountId]) {
+    return false;
+  }
+  const accounts = { ...user.accounts };
+  delete accounts[accountId];
+  const remainingIds = Object.keys(accounts);
+  const activeAccountId = remainingIds.includes(user.activeAccountId)
+    ? user.activeAccountId
+    : remainingIds[0] || null;
+  upsertUser(userId, { accounts, activeAccountId });
+  return true;
+}
+
+async function callToolWithToken(token, toolName, args) {
+  if (!token) {
+    throw new Error("缺少 MCP Token，请先设置。");
   }
 
   const cacheKey = `${toolName}:${JSON.stringify(args || {})}`;
@@ -229,7 +375,7 @@ async function callToolForUser(userId, toolName, args) {
 
   const client = new MCPClient({
     baseUrl: MCP_URL,
-    token: user.token,
+    token,
     protocolVersion: MCP_PROTOCOL_VERSION
   });
 
@@ -251,14 +397,10 @@ bot.start((ctx) => {
   const message = [
     "欢迎使用麦麦 MCP 机器人。",
     "",
-    "先获取麦当劳 MCP Token：",
-    "1) 打开 https://open.mcd.cn/mcp/doc",
-    "2) 右上角登录（手机号验证）",
-    "3) 登录后点击“控制台”，点击激活申请 MCP Token",
-    "4) 同意协议后复制 Token",
+    TOKEN_GUIDE_MESSAGE,
     "",
     "在这里发送：",
-    "/token 你的MCP_TOKEN",
+    "/token 你的MCP_TOKEN（首次会创建默认账号）",
     "",
     "指令：",
     "/calendar [YYYY-MM-DD] - 活动日历查询",
@@ -266,143 +408,336 @@ bot.start((ctx) => {
     "/claim - 麦麦省一键领券",
     "/mycoupons - 我的优惠券",
     "/time - 当前时间信息",
-    "/autoclaim on|off - 每日自动领券",
+    "/autoclaim on|off [账号名] - 每日自动领券",
+    "/autoclaimreport on|off [账号名] - 自动领券结果汇报",
+    "/account add 名称 Token - 添加账号",
+    "/account use 名称 - 切换账号",
+    "/account list - 查看账号",
+    "/account del 名称 - 删除账号",
     "/status - 查看账号状态",
-    "/cleartoken - 删除已保存的 Token"
+    "/cleartoken - 清空全部账号"
   ].join("\n");
-  ctx.reply(message, { disable_web_page_preview: true });
+  ctx.reply(message, { disable_web_page_preview: true, ...MAIN_MENU });
 });
 
+bot.command("menu", (ctx) => {
+  ctx.reply("请选择功能：", { disable_web_page_preview: true, ...MAIN_MENU });
+});
+
+function sendAccountHelp(ctx) {
+  const userId = String(ctx.from.id);
+  const user = getUser(userId);
+  const listText = user ? buildAccountListText(user) : "暂无账号，请先使用 /account add 添加账号。";
+  ctx.reply(`${ACCOUNT_HELP_MESSAGE}\n\n${listText}`);
+}
+
+function handleAccountCommand(ctx, args) {
+  const userId = String(ctx.from.id);
+  const sub = args[0] ? args[0].toLowerCase() : "";
+
+  if (!sub || sub === "help") {
+    sendAccountHelp(ctx);
+    return;
+  }
+
+  if (sub === "list") {
+    sendAccountHelp(ctx);
+    return;
+  }
+
+  if (sub === "add") {
+    const accountId = args[1];
+    const token = args.slice(2).join(" ").trim();
+    if (!accountId || !token) {
+      ctx.reply("用法：/account add 名称 Token");
+      return;
+    }
+    const existed = addOrUpdateAccount(userId, accountId, token, accountId);
+    ctx.reply(existed ? `账号 ${accountId} 已更新。` : `账号 ${accountId} 已添加。`);
+    return;
+  }
+
+  if (sub === "use") {
+    const accountId = args[1];
+    if (!accountId) {
+      ctx.reply("用法：/account use 名称");
+      return;
+    }
+    const user = getUser(userId);
+    if (!user || !user.accounts || !user.accounts[accountId]) {
+      ctx.reply(`账号不存在：${accountId}`);
+      return;
+    }
+    upsertUser(userId, { activeAccountId: accountId });
+    ctx.reply(`已切换到账号：${getAccountDisplayName(accountId, user.accounts[accountId])}`);
+    return;
+  }
+
+  if (sub === "del" || sub === "delete" || sub === "rm") {
+    const accountId = args[1];
+    if (!accountId) {
+      ctx.reply("用法：/account del 名称");
+      return;
+    }
+    const removed = removeAccount(userId, accountId);
+    ctx.reply(removed ? `账号 ${accountId} 已删除。` : `账号不存在：${accountId}`);
+    return;
+  }
+
+  ctx.reply("未知子命令。\n" + ACCOUNT_HELP_MESSAGE);
+}
+
 bot.command(["token", "settoken"], (ctx) => {
-  const text = ctx.message.text || "";
-  const token = text.split(" ").slice(1).join(" ").trim();
+  const args = parseCommandArgs(ctx);
+  const sub = args[0] ? args[0].toLowerCase() : "";
+  if (["add", "use", "list", "del", "delete", "rm", "help"].includes(sub)) {
+    handleAccountCommand(ctx, args);
+    return;
+  }
+
+  const token = args.join(" ").trim();
   if (!token) {
     ctx.reply("用法：/token 你的MCP_TOKEN");
     return;
   }
+
   const userId = String(ctx.from.id);
-  upsertUser(userId, { token });
-  ctx.reply("Token 已保存，可以开始使用指令了。");
+  const user = getUser(userId);
+  const accountId = user && user.activeAccountId ? user.activeAccountId : "default";
+  const existed = addOrUpdateAccount(userId, accountId, token, accountId === "default" ? "默认账号" : accountId);
+  ctx.reply(existed ? "Token 已更新，可以继续使用。" : "Token 已保存，可以开始使用指令了。");
+});
+
+bot.command(["account", "accounts"], (ctx) => {
+  const args = parseCommandArgs(ctx);
+  handleAccountCommand(ctx, args);
 });
 
 bot.command("cleartoken", (ctx) => {
   const userId = String(ctx.from.id);
   const existing = getUser(userId);
   if (!existing) {
-    ctx.reply("未找到已保存的 Token。");
+    ctx.reply("未找到已保存的账号。");
     return;
   }
   deleteUser(userId);
-  ctx.reply("Token 已删除。");
+  ctx.reply("已清空全部账号。");
 });
 
-bot.command("status", (ctx) => {
+function sendStatus(ctx) {
   const userId = String(ctx.from.id);
   const user = getUser(userId);
-  if (!user) {
-    ctx.reply("未保存 Token，请先使用 /token 设置。");
+  if (!user || !user.accounts || Object.keys(user.accounts).length === 0) {
+    ctx.reply("还没有添加账号，请先使用 /token 或 /account add 设置。");
     return;
   }
-  const autoClaimStatus = user.autoClaimEnabled ? "已开启" : "已关闭";
-  const lastRun = user.lastAutoClaimAt || "从未执行";
+  const activeId = user.activeAccountId;
+  const activeAccount = activeId ? user.accounts[activeId] : null;
+  const activeName = activeAccount ? getAccountDisplayName(activeId, activeAccount) : "未选择";
+  const autoClaimStatus = activeAccount && activeAccount.autoClaimEnabled ? "已开启" : "已关闭";
+  const reportStatus = activeAccount && activeAccount.autoClaimReport ? "已开启" : "已关闭";
+  const lastRun = activeAccount && activeAccount.lastAutoClaimAt ? activeAccount.lastAutoClaimAt : "从未执行";
+  const listText = buildAccountListText(user);
+
   ctx.reply(
-    `Token：${user.token ? "已设置" : "未设置"}\n自动领券：${autoClaimStatus}\n上次自动领券：${lastRun}`
+    [
+      `当前账号：${activeName}`,
+      `自动领券：${autoClaimStatus}`,
+      `结果汇报：${reportStatus}`,
+      `上次自动领券：${lastRun}`,
+      "",
+      "账号列表：",
+      listText
+    ].join("\n")
   );
-});
+}
 
-bot.command("calendar", async (ctx) => {
-  const user = ensureToken(ctx);
-  if (!user) return;
+bot.command("status", sendStatus);
 
-  const raw = (ctx.message.text || "").split(" ").slice(1).join(" ").trim();
+function sendTokenGuide(ctx) {
+  ctx.reply(TOKEN_GUIDE_MESSAGE, { disable_web_page_preview: true });
+}
+
+async function handleCalendar(ctx, specifiedDate) {
+  const info = ensureAccount(ctx);
+  if (!info) return;
+
   let args = {};
-  if (raw) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+  if (specifiedDate) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(specifiedDate)) {
       ctx.reply("日期格式错误，请使用 YYYY-MM-DD。");
       return;
     }
-    args = { specifiedDate: raw };
+    args = { specifiedDate };
   }
 
   try {
-    const result = await callToolForUser(String(ctx.from.id), "campaign-calender", args);
+    const result = await callToolWithToken(info.account.token, "campaign-calender", args);
     const text = formatToolResult(result);
     await sendLongMessage(ctx, text || "未返回数据。");
   } catch (error) {
     ctx.reply(`活动日历查询失败：${error.message}`);
   }
-});
+}
 
-bot.command("coupons", async (ctx) => {
-  const user = ensureToken(ctx);
-  if (!user) return;
+async function handleAvailableCoupons(ctx) {
+  const info = ensureAccount(ctx);
+  if (!info) return;
 
   try {
-    const result = await callToolForUser(String(ctx.from.id), "available-coupons", {});
+    const result = await callToolWithToken(info.account.token, "available-coupons", {});
     const text = formatToolResult(result);
     await sendLongMessage(ctx, text || "未返回数据。");
   } catch (error) {
     ctx.reply(`优惠券列表查询失败：${error.message}`);
   }
-});
+}
 
-bot.command("claim", async (ctx) => {
-  const user = ensureToken(ctx);
-  if (!user) return;
+async function handleClaimCoupons(ctx) {
+  const info = ensureAccount(ctx);
+  if (!info) return;
 
   try {
-    const result = await callToolForUser(String(ctx.from.id), "auto-bind-coupons", {});
+    const result = await callToolWithToken(info.account.token, "auto-bind-coupons", {});
     const text = formatToolResult(result);
     await sendLongMessage(ctx, text || "未返回数据。");
   } catch (error) {
     ctx.reply(`一键领券失败：${error.message}`);
   }
-});
+}
 
-bot.command("mycoupons", async (ctx) => {
-  const user = ensureToken(ctx);
-  if (!user) return;
+async function handleMyCoupons(ctx) {
+  const info = ensureAccount(ctx);
+  if (!info) return;
 
   try {
-    const result = await callToolForUser(String(ctx.from.id), "my-coupons", {});
+    const result = await callToolWithToken(info.account.token, "my-coupons", {});
     const text = formatToolResult(result);
     await sendLongMessage(ctx, text || "未返回数据。");
   } catch (error) {
     ctx.reply(`我的优惠券查询失败：${error.message}`);
   }
-});
+}
 
-bot.command("time", async (ctx) => {
-  const user = ensureToken(ctx);
-  if (!user) return;
+async function handleTimeInfo(ctx) {
+  const info = ensureAccount(ctx);
+  if (!info) return;
 
   try {
-    const result = await callToolForUser(String(ctx.from.id), "now-time-info", {});
+    const result = await callToolWithToken(info.account.token, "now-time-info", {});
     const text = formatToolResult(result);
     await sendLongMessage(ctx, text || "未返回数据。");
   } catch (error) {
     ctx.reply(`时间查询失败：${error.message}`);
   }
+}
+
+function handleAutoClaimSetting(ctx, enabled, accountId) {
+  const info = ensureAccount(ctx, accountId);
+  if (!info) return;
+  updateAccount(info.userId, info.accountId, { autoClaimEnabled: enabled });
+  ctx.reply(`账号 ${info.displayName} 自动领券已${enabled ? "开启" : "关闭"}。`);
+}
+
+function handleAutoClaimReportSetting(ctx, enabled, accountId) {
+  const info = ensureAccount(ctx, accountId);
+  if (!info) return;
+  updateAccount(info.userId, info.accountId, { autoClaimReport: enabled });
+  ctx.reply(`账号 ${info.displayName} 自动汇报已${enabled ? "开启" : "关闭"}。`);
+}
+
+bot.command("calendar", async (ctx) => {
+  const raw = (ctx.message.text || "").split(" ").slice(1).join(" ").trim();
+  await handleCalendar(ctx, raw || null);
+});
+
+bot.command("coupons", async (ctx) => {
+  await handleAvailableCoupons(ctx);
+});
+
+bot.command("claim", async (ctx) => {
+  await handleClaimCoupons(ctx);
+});
+
+bot.command("mycoupons", async (ctx) => {
+  await handleMyCoupons(ctx);
+});
+
+bot.command("time", async (ctx) => {
+  await handleTimeInfo(ctx);
 });
 
 bot.command("autoclaim", (ctx) => {
-  const userId = String(ctx.from.id);
-  const user = getUser(userId);
-  if (!user || !user.token) {
-    ctx.reply("请先使用 /token 设置 MCP Token。");
+  const args = parseCommandArgs(ctx);
+  const setting = args[0] ? args[0].toLowerCase() : "";
+  const accountId = args[1];
+  if (!setting || (setting !== "on" && setting !== "off")) {
+    ctx.reply("用法：/autoclaim on|off [账号名]");
     return;
   }
 
-  const text = ctx.message.text || "";
-  const arg = text.split(" ").slice(1).join(" ").trim().toLowerCase();
-  if (!arg || (arg !== "on" && arg !== "off")) {
-    ctx.reply("用法：/autoclaim on|off");
+  handleAutoClaimSetting(ctx, setting === "on", accountId);
+});
+
+bot.command("autoclaimreport", (ctx) => {
+  const args = parseCommandArgs(ctx);
+  const setting = args[0] ? args[0].toLowerCase() : "";
+  const accountId = args[1];
+  if (!setting || (setting !== "on" && setting !== "off")) {
+    ctx.reply("用法：/autoclaimreport on|off [账号名]");
     return;
   }
+  handleAutoClaimReportSetting(ctx, setting === "on", accountId);
+});
 
-  const enabled = arg === "on";
-  upsertUser(userId, { autoClaimEnabled: enabled });
-  ctx.reply(`自动领券已${enabled ? "开启" : "关闭"}。`);
+bot.action("menu_calendar", async (ctx) => {
+  await ctx.answerCbQuery();
+  await handleCalendar(ctx, null);
+});
+
+bot.action("menu_time", async (ctx) => {
+  await ctx.answerCbQuery();
+  await handleTimeInfo(ctx);
+});
+
+bot.action("menu_available", async (ctx) => {
+  await ctx.answerCbQuery();
+  await handleAvailableCoupons(ctx);
+});
+
+bot.action("menu_claim", async (ctx) => {
+  await ctx.answerCbQuery();
+  await handleClaimCoupons(ctx);
+});
+
+bot.action("menu_mycoupons", async (ctx) => {
+  await ctx.answerCbQuery();
+  await handleMyCoupons(ctx);
+});
+
+bot.action("menu_status", async (ctx) => {
+  await ctx.answerCbQuery();
+  sendStatus(ctx);
+});
+
+bot.action("menu_autoclaim_on", async (ctx) => {
+  await ctx.answerCbQuery();
+  handleAutoClaimSetting(ctx, true);
+});
+
+bot.action("menu_autoclaim_off", async (ctx) => {
+  await ctx.answerCbQuery();
+  handleAutoClaimSetting(ctx, false);
+});
+
+bot.action("menu_accounts", async (ctx) => {
+  await ctx.answerCbQuery();
+  sendAccountHelp(ctx);
+});
+
+bot.action("menu_token_help", async (ctx) => {
+  await ctx.answerCbQuery();
+  sendTokenGuide(ctx);
 });
 
 const autoClaimInProgress = new Set();
@@ -417,48 +752,61 @@ async function runAutoClaimSweep() {
   }
 
   for (const [userId, user] of Object.entries(users)) {
-    if (!user.autoClaimEnabled || !user.token) {
-      continue;
-    }
-    if (user.lastAutoClaimDate === today) {
-      continue;
-    }
-    if (autoClaimInProgress.has(userId)) {
-      continue;
-    }
-
-    autoClaimInProgress.add(userId);
-    try {
-      const result = await callToolForUser(userId, "auto-bind-coupons", {});
-      const message = [
-        `自动领券结果（${today}）：`,
-        "",
-        formatToolResult(result)
-      ].join("\n");
-
-      await sendLongMessageToUser(userId, message);
-      upsertUser(userId, {
-        lastAutoClaimDate: today,
-        lastAutoClaimAt: getLocalDateTime(AUTO_CLAIM_TIMEZONE),
-        lastAutoClaimStatus: "成功"
-      });
-    } catch (error) {
-      upsertUser(userId, {
-        lastAutoClaimDate: today,
-        lastAutoClaimAt: getLocalDateTime(AUTO_CLAIM_TIMEZONE),
-        lastAutoClaimStatus: `失败：${error.message}`
-      });
-
-      try {
-        await sendLongMessageToUser(
-          userId,
-          `自动领券失败（${today}）：${error.message}`
-        );
-      } catch (sendError) {
-        console.error("Failed to send auto-claim error to user", sendError);
+    const accounts = user.accounts || {};
+    for (const [accountId, account] of Object.entries(accounts)) {
+      if (!account || !account.token) {
+        continue;
       }
-    } finally {
-      autoClaimInProgress.delete(userId);
+      if (!account.autoClaimEnabled) {
+        continue;
+      }
+      if (account.lastAutoClaimDate === today) {
+        continue;
+      }
+
+      const taskKey = `${userId}:${accountId}`;
+      if (autoClaimInProgress.has(taskKey)) {
+        continue;
+      }
+
+      autoClaimInProgress.add(taskKey);
+      const displayName = getAccountDisplayName(accountId, account);
+      try {
+        const result = await callToolWithToken(account.token, "auto-bind-coupons", {});
+        const message = [
+          `自动领券结果（${today}）- 账号：${displayName}`,
+          "",
+          formatToolResult(result)
+        ].join("\n");
+
+        if (account.autoClaimReport !== false) {
+          await sendLongMessageToUser(userId, message);
+        }
+        updateAccount(userId, accountId, {
+          lastAutoClaimDate: today,
+          lastAutoClaimAt: getLocalDateTime(AUTO_CLAIM_TIMEZONE),
+          lastAutoClaimStatus: "成功"
+        });
+      } catch (error) {
+        updateAccount(userId, accountId, {
+          lastAutoClaimDate: today,
+          lastAutoClaimAt: getLocalDateTime(AUTO_CLAIM_TIMEZONE),
+          lastAutoClaimStatus: `失败：${error.message}`
+        });
+
+        if (account.autoClaimReport !== false) {
+          try {
+            await sendLongMessageToUser(
+              userId,
+              `自动领券失败（${today}）- 账号：${displayName}\n${error.message}`
+            );
+          } catch (sendError) {
+            console.error("Failed to send auto-claim error to user", sendError);
+          }
+        }
+      } finally {
+        autoClaimInProgress.delete(taskKey);
+      }
     }
   }
 }
@@ -477,6 +825,22 @@ function startAutoClaimScheduler() {
 bot.launch()
   .then(() => {
     console.log("Bot started.");
+    bot.telegram.setMyCommands([
+      { command: "menu", description: "打开按钮菜单" },
+      { command: "token", description: "设置 MCP Token（默认账号）" },
+      { command: "account", description: "账号管理" },
+      { command: "calendar", description: "活动日历查询" },
+      { command: "coupons", description: "可领优惠券列表" },
+      { command: "claim", description: "一键领券" },
+      { command: "mycoupons", description: "我的优惠券" },
+      { command: "time", description: "当前时间信息" },
+      { command: "autoclaim", description: "每日自动领券开关" },
+      { command: "autoclaimreport", description: "自动领券结果汇报开关" },
+      { command: "status", description: "查看账号状态" },
+      { command: "cleartoken", description: "清空全部账号" }
+    ]).catch((error) => {
+      console.error("Failed to set bot commands", error);
+    });
     runAutoClaimSweep().catch((error) => {
       console.error("Initial auto-claim sweep failed", error);
     });

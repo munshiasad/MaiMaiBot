@@ -39,8 +39,84 @@ function saveStore(store) {
 
 const store = loadStore();
 
+function normalizeUser(user, userId) {
+  let changed = false;
+
+  if (!user.accounts || typeof user.accounts !== "object") {
+    user.accounts = {};
+    changed = true;
+  }
+
+  if (user.token) {
+    const legacyAccountId = user.activeAccountId || "default";
+    if (!user.accounts[legacyAccountId]) {
+      user.accounts[legacyAccountId] = {
+        token: user.token,
+        label: legacyAccountId === "default" ? "默认账号" : legacyAccountId,
+        autoClaimEnabled: Boolean(user.autoClaimEnabled),
+        autoClaimReport: user.autoClaimReport !== false,
+        lastAutoClaimDate: user.lastAutoClaimDate,
+        lastAutoClaimAt: user.lastAutoClaimAt,
+        lastAutoClaimStatus: user.lastAutoClaimStatus
+      };
+      changed = true;
+    } else if (!user.accounts[legacyAccountId].token) {
+      user.accounts[legacyAccountId].token = user.token;
+      changed = true;
+    }
+
+    user.activeAccountId = legacyAccountId;
+    delete user.token;
+    delete user.autoClaimEnabled;
+    delete user.autoClaimReport;
+    delete user.lastAutoClaimDate;
+    delete user.lastAutoClaimAt;
+    delete user.lastAutoClaimStatus;
+    changed = true;
+  }
+
+  if (!user.activeAccountId) {
+    const firstId = Object.keys(user.accounts)[0];
+    if (firstId) {
+      user.activeAccountId = firstId;
+      changed = true;
+    }
+  }
+
+  for (const [accountId, account] of Object.entries(user.accounts)) {
+    if (!account || typeof account !== "object") {
+      user.accounts[accountId] = { token: "" };
+      changed = true;
+      continue;
+    }
+    if (!account.label) {
+      account.label = accountId === "default" ? "默认账号" : accountId;
+      changed = true;
+    }
+    if (typeof account.autoClaimEnabled !== "boolean") {
+      account.autoClaimEnabled = false;
+      changed = true;
+    }
+    if (typeof account.autoClaimReport !== "boolean") {
+      account.autoClaimReport = true;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    store.users[userId] = user;
+    saveStore(store);
+  }
+
+  return user;
+}
+
 function getUser(userId) {
-  return store.users[userId] || null;
+  const user = store.users[userId];
+  if (!user) {
+    return null;
+  }
+  return normalizeUser(user, userId);
 }
 
 function upsertUser(userId, updates) {
@@ -62,7 +138,11 @@ function deleteUser(userId) {
 }
 
 function allUsers() {
-  return store.users;
+  const normalized = {};
+  for (const [userId, user] of Object.entries(store.users)) {
+    normalized[userId] = normalizeUser(user, userId);
+  }
+  return normalized;
 }
 
 module.exports = {

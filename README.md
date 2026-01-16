@@ -11,6 +11,7 @@ A Telegram bot that calls the McDonald's MCP tools (campaign calendar, coupons, 
 - Current time info (`now-time-info`)
 - Optional 5-minute cache for non-user-specific tools
 - Daily auto-claim (once per day)
+- Multiple MCP accounts per Telegram user (switchable)
 
 ## Requirements
 
@@ -36,14 +37,19 @@ npm start
 ## Bot Commands
 
 - `/token YOUR_MCP_TOKEN` - save your MCP token
+- `/account add <name> <token>` - add/update an account
+- `/account use <name>` - switch active account
+- `/account list` - list accounts
+- `/account del <name>` - delete an account
 - `/calendar [YYYY-MM-DD]` - campaign calendar (optional date)
 - `/coupons` - available coupons
 - `/claim` - one-click claim all available coupons
 - `/mycoupons` - my coupons list
 - `/time` - current time info
-- `/autoclaim on|off` - enable/disable daily auto-claim
-- `/status` - show token and auto-claim status
-- `/cleartoken` - remove your token
+- `/autoclaim on|off [name]` - enable/disable daily auto-claim per account
+- `/autoclaimreport on|off [name]` - enable/disable auto-claim reporting per account
+- `/status` - show account status
+- `/cleartoken` - clear all accounts
 
 ## Environment Variables
 
