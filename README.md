@@ -47,7 +47,7 @@ npm start
 - `/mycoupons` - my coupons list
 - `/time` - current time info
 - `/autoclaim on|off [name]` - enable/disable daily auto-claim per account
-- `/autoclaimreport on|off [name]` - enable/disable auto-claim reporting per account
+- `/autoclaimreport success|fail on|off [name]` - enable/disable auto-claim reporting per account
 - `/status` - show account status
 - `/cleartoken` - clear all accounts
 
@@ -61,12 +61,14 @@ See `.env.example` for all options. Key variables:
 - `AUTO_CLAIM_CHECK_MINUTES` (default: `10`)
 - `AUTO_CLAIM_HOUR` (default: `9`)
 - `AUTO_CLAIM_TIMEZONE` (default: `Asia/Shanghai`)
+- `AUTO_CLAIM_SPREAD_MINUTES` (default: `600`)
 
 ## Notes
 
 - The bot uses MCP Streamable HTTP (protocol 2025-06-18).
 - The MCP token is required for all tool calls.
 - Telegraph access token is created automatically and stored at `data/telegraph.json`.
+- Auto-claim runs once per account per day, scheduled across a spread window to avoid bursts.
 
 ## Deployment
 

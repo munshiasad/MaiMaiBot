@@ -4,7 +4,7 @@ const { Telegraf, Markup } = require("telegraf");
 const { MCPClient } = require("./mcpClient");
 const { TTLCache } = require("./cache");
 const { getUser, upsertUser, deleteUser, allUsers } = require("./storage");
-const { getLocalDate, getLocalHour, getLocalDateTime } = require("./time");
+const { getLocalDate, getMinutesSinceMidnight, getLocalDateTime } = require("./time");
 const { createTelegraphPage } = require("./telegraph");
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -27,6 +27,7 @@ const CACHEABLE_TOOLS = new Set(
 const AUTO_CLAIM_CHECK_MINUTES = Number(process.env.AUTO_CLAIM_CHECK_MINUTES || 10);
 const AUTO_CLAIM_HOUR = Number(process.env.AUTO_CLAIM_HOUR || 9);
 const AUTO_CLAIM_TIMEZONE = process.env.AUTO_CLAIM_TIMEZONE || "Asia/Shanghai";
+const AUTO_CLAIM_SPREAD_MINUTES = Number(process.env.AUTO_CLAIM_SPREAD_MINUTES || 600);
 
 const cache = new TTLCache(CACHE_TTL_SECONDS * 1000);
 const bot = new Telegraf(BOT_TOKEN);
@@ -46,6 +47,8 @@ const ACCOUNT_HELP_MESSAGE = [
   "/account use 名称 - 切换账号",
   "/account list - 查看账号",
   "/account del 名称 - 删除账号",
+  "/autoclaim on|off [名称] - 自动领券开关",
+  "/autoclaimreport success|fail on|off [名称] - 汇报开关",
   "提示：名称不要包含空格"
 ].join("\n");
 
@@ -54,6 +57,8 @@ const MAIN_MENU = Markup.inlineKeyboard([
   [Markup.button.callback("可领优惠券", "menu_available"), Markup.button.callback("一键领券", "menu_claim")],
   [Markup.button.callback("我的优惠券", "menu_mycoupons"), Markup.button.callback("账号状态", "menu_status")],
   [Markup.button.callback("开启自动领券", "menu_autoclaim_on"), Markup.button.callback("关闭自动领券", "menu_autoclaim_off")],
+  [Markup.button.callback("开启成功汇报", "menu_report_success_on"), Markup.button.callback("关闭成功汇报", "menu_report_success_off")],
+  [Markup.button.callback("开启失败汇报", "menu_report_fail_on"), Markup.button.callback("关闭失败汇报", "menu_report_fail_off")],
   [Markup.button.callback("账号管理", "menu_accounts"), Markup.button.callback("Token 获取指引", "menu_token_help")]
 ]);
 
@@ -162,6 +167,41 @@ function getToolRawText(result) {
   }
 
   return rawText.replace(/\\\\\s*$/gm, "");
+}
+
+function parseClaimCounts(rawText) {
+  if (!rawText) {
+    return null;
+  }
+  const normalized = rawText.replace(/\*/g, "");
+  const getCount = (label) => {
+    const match = normalized.match(new RegExp(`${label}\\s*[:：]\\s*(\\d+)`));
+    return match ? Number(match[1]) : null;
+  };
+
+  const total = getCount("总计");
+  const success = getCount("成功");
+  const failed = getCount("失败");
+
+  if (total === null && success === null && failed === null) {
+    return null;
+  }
+
+  return { total, success, failed };
+}
+
+function hasClaimedCoupons(rawText) {
+  const counts = parseClaimCounts(rawText);
+  if (counts && Number.isFinite(counts.success)) {
+    return counts.success > 0;
+  }
+  if (/couponId[:：]/i.test(rawText) || /couponCode[:：]/i.test(rawText)) {
+    return true;
+  }
+  if (/成功领取/.test(rawText)) {
+    return true;
+  }
+  return false;
 }
 
 function stripImagesFromText(text) {
@@ -370,9 +410,10 @@ function buildAccountListText(user) {
     const name = getAccountDisplayName(accountId, account);
     const active = user.activeAccountId === accountId ? "✅" : "▫️";
     const autoClaim = account.autoClaimEnabled ? "开" : "关";
-    const report = account.autoClaimReport ? "开" : "关";
+    const reportSuccess = account.autoClaimReportSuccess ? "开" : "关";
+    const reportFail = account.autoClaimReportFailure ? "开" : "关";
     const nameWithId = name === accountId ? name : `${name}（${accountId}）`;
-    return `${active} ${nameWithId} ｜自动领券:${autoClaim} ｜汇报:${report}`;
+    return `${active} ${nameWithId} ｜自动领券:${autoClaim} ｜汇报(成):${reportSuccess} ｜汇报(败):${reportFail}`;
   });
   return lines.join("\n");
 }
@@ -443,7 +484,8 @@ function addOrUpdateAccount(userId, accountId, token, label) {
     token,
     label: label || existing.label || accountId,
     autoClaimEnabled: typeof existing.autoClaimEnabled === "boolean" ? existing.autoClaimEnabled : false,
-    autoClaimReport: typeof existing.autoClaimReport === "boolean" ? existing.autoClaimReport : true
+    autoClaimReportSuccess: typeof existing.autoClaimReportSuccess === "boolean" ? existing.autoClaimReportSuccess : true,
+    autoClaimReportFailure: typeof existing.autoClaimReportFailure === "boolean" ? existing.autoClaimReportFailure : true
   };
 
   accounts[accountId] = updated;
@@ -528,7 +570,7 @@ bot.start((ctx) => {
     "/mycoupons - 我的优惠券",
     "/time - 当前时间信息",
     "/autoclaim on|off [账号名] - 每日自动领券",
-    "/autoclaimreport on|off [账号名] - 自动领券结果汇报",
+    "/autoclaimreport success|fail on|off [账号名] - 自动领券结果汇报",
     "/account add 名称 Token - 添加账号",
     "/account use 名称 - 切换账号",
     "/account list - 查看账号",
@@ -654,7 +696,8 @@ function sendStatus(ctx) {
   const activeAccount = activeId ? user.accounts[activeId] : null;
   const activeName = activeAccount ? getAccountDisplayName(activeId, activeAccount) : "未选择";
   const autoClaimStatus = activeAccount && activeAccount.autoClaimEnabled ? "已开启" : "已关闭";
-  const reportStatus = activeAccount && activeAccount.autoClaimReport ? "已开启" : "已关闭";
+  const reportSuccessStatus = activeAccount && activeAccount.autoClaimReportSuccess ? "已开启" : "已关闭";
+  const reportFailureStatus = activeAccount && activeAccount.autoClaimReportFailure ? "已开启" : "已关闭";
   const lastRun = activeAccount && activeAccount.lastAutoClaimAt ? activeAccount.lastAutoClaimAt : "从未执行";
   const listText = buildAccountListText(user);
 
@@ -662,7 +705,8 @@ function sendStatus(ctx) {
     [
       `当前账号：${activeName}`,
       `自动领券：${autoClaimStatus}`,
-      `结果汇报：${reportStatus}`,
+      `成功汇报：${reportSuccessStatus}`,
+      `失败汇报：${reportFailureStatus}`,
       `上次自动领券：${lastRun}`,
       "",
       "账号列表：",
@@ -779,11 +823,24 @@ function handleAutoClaimSetting(ctx, enabled, accountId) {
   ctx.reply(`账号 ${info.displayName} 自动领券已${enabled ? "开启" : "关闭"}。`);
 }
 
-function handleAutoClaimReportSetting(ctx, enabled, accountId) {
+function handleAutoClaimReportSetting(ctx, type, enabled, accountId) {
   const info = ensureAccount(ctx, accountId);
   if (!info) return;
-  updateAccount(info.userId, info.accountId, { autoClaimReport: enabled });
-  ctx.reply(`账号 ${info.displayName} 自动汇报已${enabled ? "开启" : "关闭"}。`);
+
+  const updates = {};
+  if (type === "success") {
+    updates.autoClaimReportSuccess = enabled;
+  } else if (type === "failure") {
+    updates.autoClaimReportFailure = enabled;
+  } else {
+    updates.autoClaimReportSuccess = enabled;
+    updates.autoClaimReportFailure = enabled;
+  }
+
+  updateAccount(info.userId, info.accountId, updates);
+
+  const label = type === "success" ? "成功汇报" : type === "failure" ? "失败汇报" : "结果汇报";
+  ctx.reply(`账号 ${info.displayName} ${label}已${enabled ? "开启" : "关闭"}。`);
 }
 
 bot.command("calendar", async (ctx) => {
@@ -821,13 +878,27 @@ bot.command("autoclaim", (ctx) => {
 
 bot.command("autoclaimreport", (ctx) => {
   const args = parseCommandArgs(ctx);
-  const setting = args[0] ? args[0].toLowerCase() : "";
-  const accountId = args[1];
+  const first = args[0] ? args[0].toLowerCase() : "";
+  const second = args[1] ? args[1].toLowerCase() : "";
+  let type = "both";
+  let setting = "";
+  let accountId = "";
+
+  if (first === "success" || first === "fail" || first === "failure") {
+    type = first === "success" ? "success" : "failure";
+    setting = second;
+    accountId = args[2];
+  } else {
+    setting = first;
+    accountId = args[1];
+  }
+
   if (!setting || (setting !== "on" && setting !== "off")) {
-    ctx.reply("用法：/autoclaimreport on|off [账号名]");
+    ctx.reply("用法：/autoclaimreport success|fail on|off [账号名]");
     return;
   }
-  handleAutoClaimReportSetting(ctx, setting === "on", accountId);
+
+  handleAutoClaimReportSetting(ctx, type, setting === "on", accountId);
 });
 
 bot.action("menu_calendar", async (ctx) => {
@@ -870,6 +941,26 @@ bot.action("menu_autoclaim_off", async (ctx) => {
   handleAutoClaimSetting(ctx, false);
 });
 
+bot.action("menu_report_success_on", async (ctx) => {
+  await ctx.answerCbQuery();
+  handleAutoClaimReportSetting(ctx, "success", true);
+});
+
+bot.action("menu_report_success_off", async (ctx) => {
+  await ctx.answerCbQuery();
+  handleAutoClaimReportSetting(ctx, "success", false);
+});
+
+bot.action("menu_report_fail_on", async (ctx) => {
+  await ctx.answerCbQuery();
+  handleAutoClaimReportSetting(ctx, "failure", true);
+});
+
+bot.action("menu_report_fail_off", async (ctx) => {
+  await ctx.answerCbQuery();
+  handleAutoClaimReportSetting(ctx, "failure", false);
+});
+
 bot.action("menu_accounts", async (ctx) => {
   await ctx.answerCbQuery();
   sendAccountHelp(ctx);
@@ -882,12 +973,32 @@ bot.action("menu_token_help", async (ctx) => {
 
 const autoClaimInProgress = new Set();
 
+function hashString(input) {
+  let hash = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+function shouldRunAutoClaim(userId, accountId, today, nowMinutes) {
+  const startMinutes = AUTO_CLAIM_HOUR * 60;
+  if (nowMinutes < startMinutes) {
+    return false;
+  }
+  const maxWindow = 24 * 60 - startMinutes;
+  const windowMinutes = Math.max(1, Math.min(AUTO_CLAIM_SPREAD_MINUTES, maxWindow));
+  const seed = `${userId}:${accountId}:${today}`;
+  const offset = hashString(seed) % windowMinutes;
+  const targetMinute = startMinutes + offset;
+  return nowMinutes >= targetMinute;
+}
+
 async function runAutoClaimSweep() {
   const users = allUsers();
   const today = getLocalDate(AUTO_CLAIM_TIMEZONE);
-  const currentHour = getLocalHour(AUTO_CLAIM_TIMEZONE);
-
-  if (Number.isNaN(currentHour) || currentHour < AUTO_CLAIM_HOUR) {
+  const nowMinutes = getMinutesSinceMidnight(AUTO_CLAIM_TIMEZONE);
+  if (!Number.isFinite(nowMinutes)) {
     return;
   }
 
@@ -903,6 +1014,9 @@ async function runAutoClaimSweep() {
       if (account.lastAutoClaimDate === today) {
         continue;
       }
+      if (!shouldRunAutoClaim(userId, accountId, today, nowMinutes)) {
+        continue;
+      }
 
       const taskKey = `${userId}:${accountId}`;
       if (autoClaimInProgress.has(taskKey)) {
@@ -913,13 +1027,15 @@ async function runAutoClaimSweep() {
       const displayName = getAccountDisplayName(accountId, account);
       try {
         const result = await callToolWithToken(account.token, "auto-bind-coupons", {});
+        const rawText = getToolRawText(result);
+        const claimed = hasClaimedCoupons(rawText);
         const message = [
           `自动领券结果（${today}）- 账号：${displayName}`,
           "",
-          formatToolResult(result)
+          formatTelegramHtml(stripImagesFromText(rawText))
         ].join("\n");
 
-        if (account.autoClaimReport !== false) {
+        if (account.autoClaimReportSuccess !== false && claimed) {
           await sendLongMessageToUser(userId, message);
         }
         updateAccount(userId, accountId, {
@@ -934,7 +1050,7 @@ async function runAutoClaimSweep() {
           lastAutoClaimStatus: `失败：${error.message}`
         });
 
-        if (account.autoClaimReport !== false) {
+        if (account.autoClaimReportFailure !== false) {
           try {
             await sendLongMessageToUser(
               userId,
@@ -975,7 +1091,7 @@ bot.launch()
       { command: "mycoupons", description: "我的优惠券" },
       { command: "time", description: "当前时间信息" },
       { command: "autoclaim", description: "每日自动领券开关" },
-      { command: "autoclaimreport", description: "自动领券结果汇报开关" },
+      { command: "autoclaimreport", description: "自动领券汇报开关(成/败)" },
       { command: "status", description: "查看账号状态" },
       { command: "cleartoken", description: "清空全部账号" }
     ]).catch((error) => {

@@ -38,6 +38,16 @@ function getLocalHour(timeZone) {
   return hour;
 }
 
+function getLocalMinute(timeZone) {
+  const { minute } = getTimeParts(timeZone);
+  return minute;
+}
+
+function getMinutesSinceMidnight(timeZone) {
+  const { hour, minute } = getTimeParts(timeZone);
+  return hour * 60 + minute;
+}
+
 function getLocalDateTime(timeZone) {
   const { year, month, day, hour, minute, second } = getTimeParts(timeZone);
   const pad = (value) => String(value).padStart(2, "0");
@@ -47,5 +57,7 @@ function getLocalDateTime(timeZone) {
 module.exports = {
   getLocalDate,
   getLocalHour,
+  getLocalMinute,
+  getMinutesSinceMidnight,
   getLocalDateTime
 };

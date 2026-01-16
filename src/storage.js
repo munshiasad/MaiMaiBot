@@ -54,7 +54,8 @@ function normalizeUser(user, userId) {
         token: user.token,
         label: legacyAccountId === "default" ? "默认账号" : legacyAccountId,
         autoClaimEnabled: Boolean(user.autoClaimEnabled),
-        autoClaimReport: user.autoClaimReport !== false,
+        autoClaimReportSuccess: user.autoClaimReport !== false,
+        autoClaimReportFailure: user.autoClaimReport !== false,
         lastAutoClaimDate: user.lastAutoClaimDate,
         lastAutoClaimAt: user.lastAutoClaimAt,
         lastAutoClaimStatus: user.lastAutoClaimStatus
@@ -97,8 +98,24 @@ function normalizeUser(user, userId) {
       account.autoClaimEnabled = false;
       changed = true;
     }
-    if (typeof account.autoClaimReport !== "boolean") {
-      account.autoClaimReport = true;
+    if (typeof account.autoClaimReportSuccess !== "boolean") {
+      if (typeof account.autoClaimReport === "boolean") {
+        account.autoClaimReportSuccess = account.autoClaimReport;
+      } else {
+        account.autoClaimReportSuccess = true;
+      }
+      changed = true;
+    }
+    if (typeof account.autoClaimReportFailure !== "boolean") {
+      if (typeof account.autoClaimReport === "boolean") {
+        account.autoClaimReportFailure = account.autoClaimReport;
+      } else {
+        account.autoClaimReportFailure = true;
+      }
+      changed = true;
+    }
+    if (account.autoClaimReport !== undefined) {
+      delete account.autoClaimReport;
       changed = true;
     }
   }
