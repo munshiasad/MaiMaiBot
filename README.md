@@ -77,8 +77,8 @@ npm -v
 ### 2) Install the bot
 
 ```bash
-git clone <YOUR_REPO_URL> maimai-bot
-cd maimai-bot
+git clone https://github.com/ButaiKirin/MaiMaiBot.git
+cd MaiMaiBot
 cp .env.example .env
 ```
 
@@ -111,9 +111,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/maimai-bot
-EnvironmentFile=/opt/maimai-bot/.env
-ExecStart=/usr/bin/node /opt/maimai-bot/src/index.js
+WorkingDirectory=/opt/MaiMaiBot
+EnvironmentFile=/opt/MaiMaiBot/.env
+ExecStart=/usr/bin/node /opt/MaiMaiBot/src/index.js
 Restart=always
 RestartSec=5
 User=ubuntu
@@ -128,8 +128,8 @@ Adjust paths and user:
 
 ```bash
 sudo mkdir -p /opt
-sudo mv ~/maimai-bot /opt/maimai-bot
-sudo chown -R ubuntu:ubuntu /opt/maimai-bot
+sudo mv ~/MaiMaiBot /opt/MaiMaiBot
+sudo chown -R ubuntu:ubuntu /opt/MaiMaiBot
 ```
 
 Enable and start:
@@ -148,7 +148,7 @@ journalctl -u maimai-bot -f
 ### 4) Update
 
 ```bash
-cd /opt/maimai-bot
+cd /opt/MaiMaiBot
 git pull
 npm install
 sudo systemctl restart maimai-bot

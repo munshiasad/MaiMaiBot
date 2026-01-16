@@ -29,6 +29,7 @@ const AUTO_CLAIM_TIMEZONE = process.env.AUTO_CLAIM_TIMEZONE || "Asia/Shanghai";
 
 const cache = new TTLCache(CACHE_TTL_SECONDS * 1000);
 const bot = new Telegraf(BOT_TOKEN);
+let autoClaimInterval = null;
 
 function chunkText(text, maxLength = 3500) {
   const chunks = [];
@@ -345,20 +346,33 @@ function startAutoClaimScheduler() {
   if (!AUTO_CLAIM_CHECK_MINUTES || AUTO_CLAIM_CHECK_MINUTES <= 0) {
     return;
   }
-  setInterval(() => {
+  autoClaimInterval = setInterval(() => {
     runAutoClaimSweep().catch((error) => {
       console.error("Auto-claim sweep failed", error);
     });
   }, AUTO_CLAIM_CHECK_MINUTES * 60 * 1000);
 }
 
-bot.launch().then(() => {
-  console.log("Bot started.");
-  runAutoClaimSweep().catch((error) => {
-    console.error("Initial auto-claim sweep failed", error);
+bot.launch()
+  .then(() => {
+    console.log("Bot started.");
+    runAutoClaimSweep().catch((error) => {
+      console.error("Initial auto-claim sweep failed", error);
+    });
+    startAutoClaimScheduler();
+  })
+  .catch((error) => {
+    console.error("Bot failed to start.", error);
+    process.exit(1);
   });
-  startAutoClaimScheduler();
-});
 
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
+function shutdown(signal) {
+  if (autoClaimInterval) {
+    clearInterval(autoClaimInterval);
+    autoClaimInterval = null;
+  }
+  bot.stop(signal);
+}
+
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));

@@ -54,16 +54,13 @@ class MCPClient {
       method: "initialize",
       params: {
         protocolVersion: this.protocolVersion,
-        capabilities: {
-          tools: {}
-        },
+        capabilities: {},
         clientInfo: this.clientInfo
       }
     };
 
     const response = await this._sendRpc(initMessage, {
-      expectResponse: true,
-      includeProtocolHeader: false
+      expectResponse: true
     });
 
     if (!response || response.error) {
