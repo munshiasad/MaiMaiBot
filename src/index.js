@@ -47,7 +47,7 @@ let burstInterval = null;
 
 const TOKEN_GUIDE_MESSAGE = [
   "先获取麦当劳 MCP Token：",
-  "1) 打开 https://open.mcd.cn/mcp/doc",
+  "1) 打开 https://open.mcd.cn/mcp",
   "2) 右上角登录（手机号验证）",
   "3) 登录后点击“控制台”，点击激活申请 MCP Token",
   "4) 同意协议后复制 Token"
@@ -233,6 +233,43 @@ function normalizeCalendarText(rawText) {
 
 function normalizeCouponListText(rawText) {
   return normalizeToolText(rawText, { removeClaimStatus: true });
+}
+
+function simplifyClaimResultText(text) {
+  if (!text) {
+    return "";
+  }
+  const lines = text.split("\n");
+  const cleaned = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      cleaned.push(line);
+      continue;
+    }
+    if (/couponId[:：]/i.test(trimmed) || /couponCode[:：]/i.test(trimmed)) {
+      continue;
+    }
+    if (/^图片[:：]/i.test(trimmed) || /图片内容已省略/.test(trimmed)) {
+      continue;
+    }
+    if (/(领取状态|是否已领取|已领取|未领取)/.test(trimmed)) {
+      continue;
+    }
+    const bulletMatch = line.match(/^(\s*)[-*+]\s+(.*)$/);
+    if (bulletMatch) {
+      const indent = bulletMatch[1].length;
+      const content = bulletMatch[2].trim();
+      if (indent > 0) {
+        continue;
+      }
+      if (/(couponId|couponCode|图片|领取状态|是否已领取|已领取|未领取)/i.test(content)) {
+        continue;
+      }
+    }
+    cleaned.push(line);
+  }
+  return cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function parseClaimCounts(rawText) {
@@ -978,8 +1015,9 @@ async function handleClaimCoupons(ctx) {
     const result = await callToolWithToken(info.account.token, "auto-bind-coupons", {});
     const rawText = getToolRawText(result);
     const normalized = normalizeToolText(rawText);
+    const simplified = simplifyClaimResultText(normalized);
     recordClaimedCoupons(normalized, { userId: info.userId, accountId: info.accountId, reason: "manual" });
-    const text = formatTelegramHtml(stripImagesFromText(normalized));
+    const text = formatTelegramHtml(stripImagesFromText(simplified));
     await sendLongMessage(ctx, text || "未返回数据。");
   } catch (error) {
     ctx.reply(`一键领券失败：${error.message}`);
@@ -1329,6 +1367,7 @@ async function runAutoClaimSweep() {
         const result = await callToolWithToken(task.account.token, "auto-bind-coupons", {});
         const rawText = getToolRawText(result);
         const normalized = normalizeToolText(rawText);
+        const simplified = simplifyClaimResultText(normalized);
         const claimed = hasClaimedCoupons(normalized);
         recordClaimedCoupons(normalized, {
           userId: task.userId,
@@ -1339,7 +1378,7 @@ async function runAutoClaimSweep() {
         const message = [
           `自动领券结果（${today}）- 账号：${task.displayName}`,
           "",
-          formatTelegramHtml(stripImagesFromText(normalized))
+          formatTelegramHtml(stripImagesFromText(simplified))
         ].join("\n");
 
         if (task.account.autoClaimReportSuccess !== false && claimed) {

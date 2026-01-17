@@ -16,7 +16,7 @@ A Telegram bot that calls the McDonald's MCP tools (campaign calendar and coupon
 
 - Node.js 18+ (Node.js 20+ recommended)
 - A Telegram bot token from BotFather
-- An MCP token from https://open.mcd.cn/mcp/doc
+- An MCP token from https://open.mcd.cn/mcp
 
 ## Quick Start
 
