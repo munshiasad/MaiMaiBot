@@ -438,6 +438,19 @@ function hasClaimedCoupons(rawText) {
   return false;
 }
 
+function isAuthFailureMessage(message) {
+  if (!message) {
+    return false;
+  }
+  const text = String(message);
+  return (
+    /\b401\b/.test(text) ||
+    /鉴权码/.test(text) ||
+    /token.*(无效|失效)/i.test(text) ||
+    /unauthorized|authorization/i.test(text)
+  );
+}
+
 function parseCouponIds(rawText) {
   if (!rawText) {
     return [];
@@ -714,6 +727,18 @@ function formatTimestamp(ms, timeZone) {
   return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
 }
 
+function formatSignedDelta(delta) {
+  const safeDelta = Number.isFinite(delta) ? delta : 0;
+  const sign = safeDelta >= 0 ? "+" : "-";
+  return `(${sign}${Math.abs(safeDelta)})`;
+}
+
+function formatCountWithDelta(value, baseline) {
+  const current = Number.isFinite(value) ? value : 0;
+  const base = Number.isFinite(baseline) ? baseline : current;
+  return `${current} ${formatSignedDelta(current - base)}`;
+}
+
 function getAdminSettings() {
   const state = getGlobalState();
   return state.admin || {};
@@ -847,12 +872,16 @@ function ensureAccount(ctx, accountId) {
 function addOrUpdateAccount(userId, accountId, token, label) {
   const user = getUser(userId) || {};
   const accounts = { ...(user.accounts || {}) };
-  const existing = accounts[accountId] || {};
+  const existingAccount = accounts[accountId];
+  const isNewAccount = !existingAccount;
+  const existing = existingAccount || {};
+  const defaultAutoClaimEnabled = isNewAccount;
   const updated = {
     ...existing,
     token,
     label: label || existing.label || accountId,
-    autoClaimEnabled: typeof existing.autoClaimEnabled === "boolean" ? existing.autoClaimEnabled : false,
+    autoClaimEnabled:
+      typeof existing.autoClaimEnabled === "boolean" ? existing.autoClaimEnabled : defaultAutoClaimEnabled,
     autoClaimReportSuccess: typeof existing.autoClaimReportSuccess === "boolean" ? existing.autoClaimReportSuccess : true,
     autoClaimReportFailure: typeof existing.autoClaimReportFailure === "boolean" ? existing.autoClaimReportFailure : true
   };
@@ -921,6 +950,28 @@ async function callToolWithToken(token, toolName, args) {
   return result;
 }
 
+async function validateToken(token) {
+  if (!token) {
+    return { ok: false, authFailure: true, message: "缺少 MCP Token，请先设置。" };
+  }
+  try {
+    const client = new MCPClient({
+      baseUrl: MCP_URL,
+      token,
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      requestTimeoutMs: MCP_REQUEST_TIMEOUT_MS
+    });
+    await client.callTool("my-coupons", {});
+    return { ok: true };
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    if (isAuthFailureMessage(message)) {
+      return { ok: false, authFailure: true, message };
+    }
+    return { ok: false, authFailure: false, message };
+  }
+}
+
 bot.catch((error, ctx) => {
   console.error("Bot error", error);
   const message = error && error.message ? error.message : "";
@@ -974,7 +1025,7 @@ function sendAccountHelp(ctx) {
   ctx.reply(`${ACCOUNT_HELP_MESSAGE}\n\n${listText}`);
 }
 
-function handleAccountCommand(ctx, args) {
+async function handleAccountCommand(ctx, args) {
   const userId = String(ctx.from.id);
   const sub = args[0] ? args[0].toLowerCase() : "";
 
@@ -995,7 +1046,18 @@ function handleAccountCommand(ctx, args) {
       ctx.reply("用法：/account add 名称 Token");
       return;
     }
+    const validation = await validateToken(token);
+    if (!validation.ok && validation.authFailure) {
+      ctx.reply(`账号 ${accountId} Token 无效或已失效，请重新获取。`);
+      return;
+    }
     const existed = addOrUpdateAccount(userId, accountId, token, accountId);
+    if (!validation.ok) {
+      ctx.reply(
+        `${existed ? "账号已更新" : "账号已添加"}，但暂时无法验证 Token：${validation.message}`
+      );
+      return;
+    }
     ctx.reply(existed ? `账号 ${accountId} 已更新。` : `账号 ${accountId} 已添加。`);
     return;
   }
@@ -1030,11 +1092,11 @@ function handleAccountCommand(ctx, args) {
   ctx.reply("未知子命令。\n" + ACCOUNT_HELP_MESSAGE);
 }
 
-bot.command(["token", "settoken"], (ctx) => {
+bot.command(["token", "settoken"], async (ctx) => {
   const args = parseCommandArgs(ctx);
   const sub = args[0] ? args[0].toLowerCase() : "";
   if (["add", "use", "list", "del", "delete", "rm", "help"].includes(sub)) {
-    handleAccountCommand(ctx, args);
+    await handleAccountCommand(ctx, args);
     return;
   }
 
@@ -1047,13 +1109,22 @@ bot.command(["token", "settoken"], (ctx) => {
   const userId = String(ctx.from.id);
   const user = getUser(userId);
   const accountId = user && user.activeAccountId ? user.activeAccountId : "default";
+  const validation = await validateToken(token);
+  if (!validation.ok && validation.authFailure) {
+    ctx.reply("Token 无效或已失效，请重新获取。");
+    return;
+  }
   const existed = addOrUpdateAccount(userId, accountId, token, accountId === "default" ? "默认账号" : accountId);
+  if (!validation.ok) {
+    ctx.reply(`${existed ? "Token 已更新" : "Token 已保存"}，但暂时无法验证：${validation.message}`);
+    return;
+  }
   ctx.reply(existed ? "Token 已更新，可以继续使用。" : "Token 已保存，可以开始使用指令了。");
 });
 
-bot.command(["account", "accounts"], (ctx) => {
+bot.command(["account", "accounts"], async (ctx) => {
   const args = parseCommandArgs(ctx);
-  handleAccountCommand(ctx, args);
+  await handleAccountCommand(ctx, args);
 });
 
 bot.command("cleartoken", (ctx) => {
@@ -1115,6 +1186,81 @@ function sendStats(ctx) {
 
 bot.command("stats", sendStats);
 
+function computeAdminMetrics(today) {
+  const users = allUsers();
+  const metrics = {
+    userCount: Object.keys(users).length,
+    accountCount: 0,
+    autoClaimEnabledCount: 0,
+    autoClaimDisabledCount: 0,
+    doneCount: 0,
+    pendingCount: 0,
+    todayAutoClaimSuccess: 0,
+    todayAutoClaimFailureAuth: 0,
+    todayAutoClaimFailureOther: 0,
+    totalAutoClaimRuns: 0,
+    totalManualClaimRuns: 0,
+    totalCouponsClaimed: 0,
+    knownCouponsCount: 0
+  };
+
+  for (const user of Object.values(users)) {
+    const accounts = user.accounts || {};
+    const entries = Object.values(accounts);
+    metrics.accountCount += entries.length;
+    for (const account of entries) {
+      if (!account) {
+        continue;
+      }
+      const ranToday = account.lastAutoClaimDate === today;
+      if (ranToday && account.lastAutoClaimStatus) {
+        const status = String(account.lastAutoClaimStatus);
+        if (status.startsWith("成功")) {
+          metrics.todayAutoClaimSuccess += 1;
+        } else if (status.startsWith("失败")) {
+          const reason = status.replace(/^失败[:：]\s*/, "");
+          if (isAuthFailureMessage(reason) || isAuthFailureMessage(status)) {
+            metrics.todayAutoClaimFailureAuth += 1;
+          } else {
+            metrics.todayAutoClaimFailureOther += 1;
+          }
+        }
+      }
+      if (account.autoClaimEnabled) {
+        metrics.autoClaimEnabledCount += 1;
+        if (ranToday) {
+          metrics.doneCount += 1;
+        } else {
+          metrics.pendingCount += 1;
+        }
+      } else {
+        metrics.autoClaimDisabledCount += 1;
+      }
+    }
+
+    const stats = user.stats || {};
+    metrics.totalAutoClaimRuns += Number(stats.autoClaimRuns) || 0;
+    metrics.totalManualClaimRuns += Number(stats.manualClaimRuns) || 0;
+    metrics.totalCouponsClaimed += Number(stats.couponsClaimed) || 0;
+  }
+
+  const state = getGlobalState();
+  metrics.knownCouponsCount = state.knownCoupons ? Object.keys(state.knownCoupons).length : 0;
+
+  return metrics;
+}
+
+function getAdminSummaryBaseline(today, metrics) {
+  const state = getGlobalState();
+  const snapshot = state.adminSummarySnapshot;
+  if (snapshot && snapshot.date === today && snapshot.metrics && typeof snapshot.metrics === "object") {
+    return snapshot.metrics;
+  }
+  const baseline = { ...(metrics || computeAdminMetrics(today)) };
+  updateGlobalState({ adminSummarySnapshot: { date: today, metrics: baseline } });
+  return baseline;
+}
+
 bot.command("admin", (ctx) => {
   if (!ensureAdmin(ctx)) {
     return;
@@ -1143,43 +1289,11 @@ bot.command("admin", (ctx) => {
     sub === "status"
   ) {
     const today = getLocalDate(AUTO_CLAIM_TIMEZONE);
-    const users = allUsers();
-    const userCount = Object.keys(users).length;
-    let accountCount = 0;
-    let autoClaimEnabledCount = 0;
-    let autoClaimDisabledCount = 0;
-    let doneCount = 0;
-    let pendingCount = 0;
-    let totalAutoClaimRuns = 0;
-    let totalManualClaimRuns = 0;
-    let totalCouponsClaimed = 0;
-
-    for (const user of Object.values(users)) {
-      const accounts = user.accounts || {};
-      const entries = Object.values(accounts);
-      accountCount += entries.length;
-      for (const account of entries) {
-        if (!account) {
-          continue;
-        }
-        if (account.autoClaimEnabled) {
-          autoClaimEnabledCount += 1;
-          if (account.lastAutoClaimDate === today) {
-            doneCount += 1;
-          } else {
-            pendingCount += 1;
-          }
-        } else {
-          autoClaimDisabledCount += 1;
-        }
-      }
-
-      const stats = user.stats || {};
-      totalAutoClaimRuns += Number(stats.autoClaimRuns) || 0;
-      totalManualClaimRuns += Number(stats.manualClaimRuns) || 0;
-      totalCouponsClaimed += Number(stats.couponsClaimed) || 0;
-    }
-
+    const metrics = computeAdminMetrics(today);
+    const baseline = getAdminSummaryBaseline(today, metrics);
+    const totalFailure = metrics.todayAutoClaimFailureAuth + metrics.todayAutoClaimFailureOther;
+    const baselineFailure =
+      (Number(baseline.todayAutoClaimFailureAuth) || 0) + (Number(baseline.todayAutoClaimFailureOther) || 0);
     const state = getGlobalState();
     const lastRequestAt = formatTimestamp(state.lastAutoClaimRequestAt, AUTO_CLAIM_TIMEZONE);
     const lastSweepStartedAt = formatTimestamp(state.lastSweepStartedAt, AUTO_CLAIM_TIMEZONE);
@@ -1191,7 +1305,6 @@ bot.command("admin", (ctx) => {
     const lastSweepEligible = Number(state.lastSweepEligible) || 0;
     const lastSweepReason = state.lastSweepReason || "无";
     const lastSweepError = state.lastSweepError || "无";
-    const knownCouponsCount = state.knownCoupons ? Object.keys(state.knownCoupons).length : 0;
 
     const burst = getActiveBurst();
     const burstRemainingMs = burst ? Math.max(0, burst.endAt - Date.now()) : 0;
@@ -1210,16 +1323,21 @@ bot.command("admin", (ctx) => {
     ctx.reply(
       [
         "管理员概览：",
-        `用户数：${userCount}`,
-        `账号数：${accountCount}`,
-        `自动领券开启账号数：${autoClaimEnabledCount}`,
-        `自动领券关闭账号数：${autoClaimDisabledCount}`,
-        `今日已执行账号数：${doneCount}`,
-        `今日待执行账号数：${pendingCount}`,
-        `自动领券次数总计：${totalAutoClaimRuns}`,
-        `手动领券次数总计：${totalManualClaimRuns}`,
-        `累计领取优惠券总计：${totalCouponsClaimed}`,
-        `已记录券 ID 数量：${knownCouponsCount}`,
+        `用户数：${formatCountWithDelta(metrics.userCount, baseline.userCount)}`,
+        `账号数：${formatCountWithDelta(metrics.accountCount, baseline.accountCount)}`,
+        `自动领券开启账号数：${formatCountWithDelta(metrics.autoClaimEnabledCount, baseline.autoClaimEnabledCount)}`,
+        `自动领券关闭账号数：${formatCountWithDelta(metrics.autoClaimDisabledCount, baseline.autoClaimDisabledCount)}`,
+        `今日已执行账号数：${formatCountWithDelta(metrics.doneCount, baseline.doneCount)}`,
+        `今日待执行账号数：${formatCountWithDelta(metrics.pendingCount, baseline.pendingCount)}`,
+        `今日自动领券成功数：${formatCountWithDelta(metrics.todayAutoClaimSuccess, baseline.todayAutoClaimSuccess)}`,
+        `今日自动领券失败数：${formatCountWithDelta(totalFailure, baselineFailure)}（鉴权${formatCountWithDelta(
+          metrics.todayAutoClaimFailureAuth,
+          baseline.todayAutoClaimFailureAuth
+        )}｜其他${formatCountWithDelta(metrics.todayAutoClaimFailureOther, baseline.todayAutoClaimFailureOther)}）`,
+        `自动领券次数总计：${formatCountWithDelta(metrics.totalAutoClaimRuns, baseline.totalAutoClaimRuns)}`,
+        `手动领券次数总计：${formatCountWithDelta(metrics.totalManualClaimRuns, baseline.totalManualClaimRuns)}`,
+        `累计领取优惠券总计：${formatCountWithDelta(metrics.totalCouponsClaimed, baseline.totalCouponsClaimed)}`,
+        `已记录券 ID 数量：${formatCountWithDelta(metrics.knownCouponsCount, baseline.knownCouponsCount)}`,
         `最近自动领券请求：${lastRequestAt}`,
         `最近 Sweep：开始 ${lastSweepStartedAt} ｜结束 ${lastSweepFinishedAt} ｜耗时 ${lastSweepDuration} ｜原因 ${lastSweepReason}`,
         `Sweep 进度：符合 ${lastSweepEligible} ｜已处理 ${lastSweepProcessed} ｜状态 ${autoClaimSweepInProgress ? "运行中" : "空闲"}`,
@@ -1793,21 +1911,45 @@ async function runAutoClaimSweep() {
           lastRerunAt: Date.now()
         });
       } catch (error) {
-        updateAccount(task.userId, task.accountId, {
+        const authFailure = isAuthFailureMessage(error && error.message ? error.message : "");
+        const shouldNotifyAuthFailure =
+          authFailure && task.account.lastAuthFailureNotifiedDate !== today;
+        const accountUpdates = {
           lastAutoClaimDate: today,
           lastAutoClaimAt: getLocalDateTime(AUTO_CLAIM_TIMEZONE),
           lastAutoClaimStatus: `失败：${error.message}`,
           lastBurstId: task.reason === "burst" ? burst.id : task.account.lastBurstId,
           lastRerunAt: Date.now()
+        };
+        if (shouldNotifyAuthFailure) {
+          accountUpdates.lastAuthFailureNotifiedDate = today;
+        }
+        updateAccount(task.userId, task.accountId, {
+          ...accountUpdates
         });
 
         sweepError = error.message || sweepError;
         logAutoClaim(`Auto-claim failed: account=${task.displayName}, error=${error.message}`);
         await notifyAdmins(
-          `自动领券失败（${today}）- 账号：${task.displayName}\n原因：${error.message}`
+          `自动领券失败（${today}）- Token：${task.account.token}\n原因：${error.message}`
         );
 
-        if (task.account.autoClaimReportFailure !== false) {
+        if (authFailure) {
+          if (shouldNotifyAuthFailure) {
+            try {
+              await sendLongMessageToUser(
+                task.userId,
+                [
+                  `自动领券失败（${today}）- 账号：${task.displayName}`,
+                  "原因：鉴权失败，Token 已失效，请更新 Token。",
+                  "可使用 /token 或 /account add 重新设置。"
+                ].join("\n")
+              );
+            } catch (sendError) {
+              console.error("Failed to send auth-failure notice to user", sendError);
+            }
+          }
+        } else if (task.account.autoClaimReportFailure !== false) {
           try {
             await sendLongMessageToUser(
               task.userId,
@@ -1868,6 +2010,8 @@ function startSweepWatchdog() {
   }
   logAutoClaim(`Sweep watchdog started: every ${SWEEP_WATCHDOG_SECONDS} seconds.`);
   const check = () => {
+    const today = getLocalDate(AUTO_CLAIM_TIMEZONE);
+    getAdminSummaryBaseline(today);
     const state = getGlobalState();
     const lastFinished = state.lastSweepFinishedAt || state.lastSweepStartedAt || 0;
     const staleAfterMs =
