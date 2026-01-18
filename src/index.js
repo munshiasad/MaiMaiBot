@@ -15,6 +15,7 @@ if (!BOT_TOKEN) {
 
 const MCP_URL = process.env.MCD_MCP_URL || "https://mcp.mcd.cn/mcp-servers/mcd-mcp";
 const MCP_PROTOCOL_VERSION = process.env.MCP_PROTOCOL_VERSION || "2025-06-18";
+const MCP_REQUEST_TIMEOUT_MS = Number(process.env.MCP_REQUEST_TIMEOUT_MS || 30000);
 
 const CACHE_TTL_SECONDS = Number(process.env.CACHE_TTL_SECONDS || 300);
 const CACHEABLE_TOOLS = new Set(
@@ -812,7 +813,8 @@ async function callToolWithToken(token, toolName, args) {
   const client = new MCPClient({
     baseUrl: MCP_URL,
     token,
-    protocolVersion: MCP_PROTOCOL_VERSION
+    protocolVersion: MCP_PROTOCOL_VERSION,
+    requestTimeoutMs: MCP_REQUEST_TIMEOUT_MS
   });
 
   const result = await client.callTool(toolName, args || {});

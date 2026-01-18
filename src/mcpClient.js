@@ -2,10 +2,11 @@ const DEFAULT_ACCEPT = "application/json, text/event-stream";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
 
 class MCPClient {
-  constructor({ baseUrl, token, protocolVersion = DEFAULT_PROTOCOL_VERSION, clientInfo }) {
+  constructor({ baseUrl, token, protocolVersion = DEFAULT_PROTOCOL_VERSION, clientInfo, requestTimeoutMs }) {
     this.baseUrl = baseUrl;
     this.token = token;
     this.protocolVersion = protocolVersion;
+    this.requestTimeoutMs = Number.isFinite(requestTimeoutMs) ? requestTimeoutMs : null;
     this.clientInfo = clientInfo || {
       name: "MaiMaiTelegramBot",
       title: "MaiMai Telegram Bot",
@@ -106,11 +107,30 @@ class MCPClient {
       headers["MCP-Protocol-Version"] = this.protocolVersion;
     }
 
-    const response = await fetch(this.baseUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(message)
-    });
+    const controller = new AbortController();
+    let timeoutId = null;
+    if (this.requestTimeoutMs && this.requestTimeoutMs > 0) {
+      timeoutId = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    }
+
+    let response;
+    try {
+      response = await fetch(this.baseUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(message),
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        throw new Error(`MCP request timed out after ${this.requestTimeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
 
     if (!expectResponse) {
       if (![200, 202, 204].includes(response.status)) {

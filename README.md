@@ -57,6 +57,7 @@ npm start
 See `.env.example` for all options. Key variables:
 
 - `MCD_MCP_URL` (default: `https://mcp.mcd.cn/mcp-servers/mcd-mcp`)
+- `MCP_REQUEST_TIMEOUT_MS` (default: `30000`)
 - `CACHE_TTL_SECONDS` (default: `300`)
 - `CACHEABLE_TOOLS` (default: `campaign-calender,available-coupons`)
 - `AUTO_CLAIM_CHECK_MINUTES` (default: `10`)
