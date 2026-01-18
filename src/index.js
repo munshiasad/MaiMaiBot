@@ -1457,8 +1457,10 @@ async function sendTelegraphArticle(ctx, title, rawText, fallbackPrefix, cacheKe
     if (cacheKey) {
       const cached = telegraphCache.get(cacheKey);
       if (cached) {
-        await ctx.reply(cached, {
-          disable_web_page_preview: false
+        const message = `<a href="${escapeHtml(cached)}">点击查看</a>`;
+        await ctx.reply(message, {
+          disable_web_page_preview: false,
+          parse_mode: "HTML"
         });
         return;
       }
@@ -1468,8 +1470,10 @@ async function sendTelegraphArticle(ctx, title, rawText, fallbackPrefix, cacheKe
     if (cacheKey) {
       telegraphCache.set(cacheKey, url);
     }
-    await ctx.reply(url, {
-      disable_web_page_preview: false
+    const message = `<a href="${escapeHtml(url)}">点击查看</a>`;
+    await ctx.reply(message, {
+      disable_web_page_preview: false,
+      parse_mode: "HTML"
     });
   } catch (error) {
     const label = fallbackPrefix || title || "内容";
