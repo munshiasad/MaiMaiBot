@@ -1125,7 +1125,30 @@ bot.command("admin", (ctx) => {
     return;
   }
 
-  ctx.reply("用法：/admin | /admin notify on|off");
+  if (sub === "sweep" || sub === "run") {
+    runAutoClaimSweep()
+      .then(() => {
+        const state = getGlobalState();
+        ctx.reply(
+          [
+            "手动触发 Sweep 完成：",
+            `开始：${formatTimestamp(state.lastSweepStartedAt, AUTO_CLAIM_TIMEZONE)}`,
+            `结束：${formatTimestamp(state.lastSweepFinishedAt, AUTO_CLAIM_TIMEZONE)}`,
+            `耗时：${state.lastSweepDurationMs ? `${Math.round(state.lastSweepDurationMs / 1000)}秒` : "无"}`,
+            `原因：${state.lastSweepReason || "无"}`,
+            `符合：${state.lastSweepEligible || 0}`,
+            `已处理：${state.lastSweepProcessed || 0}`,
+            `错误：${state.lastSweepError || "无"}`
+          ].join("\n")
+        );
+      })
+      .catch((error) => {
+        ctx.reply(`手动 Sweep 失败：${error.message}`);
+      });
+    return;
+  }
+
+  ctx.reply("用法：/admin | /admin notify on|off | /admin sweep");
 });
 
 function sendTokenGuide(ctx) {
@@ -1481,7 +1504,7 @@ async function runAutoClaimSweep() {
   const sweepStartedAt = Date.now();
   let sweepEligible = 0;
   let sweepProcessed = 0;
-  let sweepReason = "";
+  let sweepReason = "daily";
   let sweepError = "";
 
   try {
@@ -1489,14 +1512,15 @@ async function runAutoClaimSweep() {
     const nowMs = Date.now();
     const burst = getActiveBurst();
     ensureBurstScheduler(Boolean(burst));
+    sweepReason = burst ? "burst" : "daily";
     const today = getLocalDate(AUTO_CLAIM_TIMEZONE);
     const nowMinutes = getMinutesSinceMidnight(AUTO_CLAIM_TIMEZONE);
     if (!Number.isFinite(nowMinutes)) {
+      sweepError = "invalid_time";
       return;
     }
 
     const tasks = [];
-    sweepReason = burst ? "burst" : "daily";
 
     for (const [userId, user] of Object.entries(users)) {
       const accounts = user.accounts || {};
@@ -1545,16 +1569,6 @@ async function runAutoClaimSweep() {
     }
 
     sweepEligible = tasks.length;
-    updateGlobalState({
-      lastSweepStartedAt: sweepStartedAt,
-      lastSweepReason: sweepReason,
-      lastSweepEligible: sweepEligible,
-      lastSweepProcessed: 0,
-      lastSweepFinishedAt: 0,
-      lastSweepDurationMs: 0,
-      lastSweepError: ""
-    });
-
     if (tasks.length === 0) {
       return;
     }
@@ -1669,12 +1683,14 @@ function startAutoClaimScheduler() {
   if (!AUTO_CLAIM_CHECK_MINUTES || AUTO_CLAIM_CHECK_MINUTES <= 0) {
     return;
   }
-  autoClaimInterval = setInterval(() => {
+  const trigger = () => {
     runAutoClaimSweep().catch((error) => {
       console.error("Auto-claim sweep failed", error);
       notifyAdmins(`自动领券调度异常：${error.message}`);
     });
-  }, AUTO_CLAIM_CHECK_MINUTES * 60 * 1000);
+  };
+  trigger();
+  autoClaimInterval = setInterval(trigger, AUTO_CLAIM_CHECK_MINUTES * 60 * 1000);
 }
 
 bot.launch()
@@ -1696,10 +1712,6 @@ bot.launch()
       { command: "admin", description: "管理员统计" }
     ]).catch((error) => {
       console.error("Failed to set bot commands", error);
-    });
-    runAutoClaimSweep().catch((error) => {
-      console.error("Initial auto-claim sweep failed", error);
-      notifyAdmins(`自动领券启动异常：${error.message}`);
     });
     startAutoClaimScheduler();
   })

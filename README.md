@@ -49,8 +49,9 @@ npm start
 - `/status` - show account status
 - `/stats` - my claim stats
 - `/cleartoken` - clear all accounts
-- `/admin` - admin summary (users/accounts/auto-claim status/claim totals/config)
+- `/admin` - admin summary (users/accounts/auto-claim status/claim totals/config/sweep状态)
 - `/admin notify on|off` - admin error push toggle
+- `/admin sweep` - run a sweep immediately (admin)
 
 ## Environment Variables
 
