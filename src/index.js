@@ -142,6 +142,13 @@ async function sendLongMessageToUser(userId, text, options = {}) {
   }
 }
 
+async function sendPlainMessageToUser(userId, text) {
+  const chunks = chunkText(text);
+  for (const chunk of chunks) {
+    await bot.telegram.sendMessage(userId, chunk, { disable_web_page_preview: true });
+  }
+}
+
 function getToolRawText(result) {
   let rawText = "";
 
@@ -581,6 +588,39 @@ function parseCommandArgs(ctx) {
   return text.split(/\s+/).slice(1).filter(Boolean);
 }
 
+function getAdminSettings() {
+  const state = getGlobalState();
+  return state.admin || {};
+}
+
+function isAdminErrorPushEnabled() {
+  const settings = getAdminSettings();
+  return Boolean(settings.errorPushEnabled);
+}
+
+function updateAdminSettings(updates) {
+  const state = getGlobalState();
+  const admin = { ...(state.admin || {}), ...updates };
+  updateGlobalState({ admin });
+  return admin;
+}
+
+async function notifyAdmins(message) {
+  if (!isAdminErrorPushEnabled()) {
+    return;
+  }
+  if (!ADMIN_TELEGRAM_IDS.size) {
+    return;
+  }
+  for (const adminId of ADMIN_TELEGRAM_IDS) {
+    try {
+      await sendPlainMessageToUser(adminId, message);
+    } catch (error) {
+      console.error("Failed to send admin notification", error);
+    }
+  }
+}
+
 function ensureAdmin(ctx) {
   if (!ADMIN_TELEGRAM_IDS.size) {
     ctx.reply("未配置管理员 ID，请先设置 ADMIN_TELEGRAM_IDS。");
@@ -756,6 +796,7 @@ async function callToolWithToken(token, toolName, args) {
 
 bot.catch((error, ctx) => {
   console.error("Bot error", error);
+  notifyAdmins(`Bot 运行异常：${error.message}`);
   if (ctx && ctx.reply) {
     ctx.reply("出错了，请稍后再试。");
   }
@@ -947,6 +988,64 @@ bot.command("admin", (ctx) => {
   const args = parseCommandArgs(ctx);
   const sub = args[0] ? args[0].toLowerCase() : "users";
 
+  if (sub === "notify" || sub === "push" || sub === "alert") {
+    const setting = args[1] ? args[1].toLowerCase() : "";
+    if (setting !== "on" && setting !== "off") {
+      ctx.reply("用法：/admin notify on|off");
+      return;
+    }
+    const enabled = setting === "on";
+    updateAdminSettings({ errorPushEnabled: enabled });
+    ctx.reply(`管理员报错推送已${enabled ? "开启" : "关闭"}。`);
+    return;
+  }
+
+  if (sub === "status") {
+    const today = getLocalDate(AUTO_CLAIM_TIMEZONE);
+    let enabledCount = 0;
+    let disabledCount = 0;
+    let doneCount = 0;
+    let pendingCount = 0;
+    const users = allUsers();
+    for (const user of Object.values(users)) {
+      const accounts = user.accounts || {};
+      for (const account of Object.values(accounts)) {
+        if (!account) {
+          continue;
+        }
+        if (account.autoClaimEnabled) {
+          enabledCount += 1;
+          if (account.lastAutoClaimDate === today) {
+            doneCount += 1;
+          } else {
+            pendingCount += 1;
+          }
+        } else {
+          disabledCount += 1;
+        }
+      }
+    }
+
+    const burst = getActiveBurst();
+    const burstRemainingMs = burst ? Math.max(0, burst.endAt - Date.now()) : 0;
+    const burstRemainingMinutes = burst ? Math.ceil(burstRemainingMs / 60000) : 0;
+    const burstStatus = burst ? `进行中（剩余约 ${burstRemainingMinutes} 分钟）` : "无";
+
+    const errorPushStatus = isAdminErrorPushEnabled() ? "开" : "关";
+    ctx.reply(
+      [
+        "管理员状态：",
+        `自动领券开启账号数：${enabledCount}`,
+        `自动领券关闭账号数：${disabledCount}`,
+        `今日已执行账号数：${doneCount}`,
+        `今日待执行账号数：${pendingCount}`,
+        `Burst 窗口：${burstStatus}`,
+        `报错推送：${errorPushStatus}`
+      ].join("\n")
+    );
+    return;
+  }
+
   if (sub === "users" || sub === "stats" || sub === "count") {
     const users = allUsers();
     const userCount = Object.keys(users).length;
@@ -979,7 +1078,7 @@ bot.command("admin", (ctx) => {
     return;
   }
 
-  ctx.reply("用法：/admin users");
+  ctx.reply("用法：/admin users | /admin status | /admin notify on|off");
 });
 
 function sendTokenGuide(ctx) {
@@ -1321,6 +1420,7 @@ function ensureBurstScheduler(enabled) {
   burstInterval = setInterval(() => {
     runAutoClaimSweep().catch((error) => {
       console.error("Burst auto-claim sweep failed", error);
+      notifyAdmins(`Burst 自动领券调度异常：${error.message}`);
     });
   }, GLOBAL_BURST_CHECK_SECONDS * 1000);
 }
@@ -1461,6 +1561,10 @@ async function runAutoClaimSweep() {
           lastBurstId: task.reason === "burst" ? burst.id : task.account.lastBurstId
         });
 
+        await notifyAdmins(
+          `自动领券失败（${today}）- 账号：${task.displayName}\n原因：${error.message}`
+        );
+
         if (task.account.autoClaimReportFailure !== false) {
           try {
             await sendLongMessageToUser(
@@ -1488,6 +1592,7 @@ function startAutoClaimScheduler() {
   autoClaimInterval = setInterval(() => {
     runAutoClaimSweep().catch((error) => {
       console.error("Auto-claim sweep failed", error);
+      notifyAdmins(`自动领券调度异常：${error.message}`);
     });
   }, AUTO_CLAIM_CHECK_MINUTES * 60 * 1000);
 }
@@ -1514,6 +1619,7 @@ bot.launch()
     });
     runAutoClaimSweep().catch((error) => {
       console.error("Initial auto-claim sweep failed", error);
+      notifyAdmins(`自动领券启动异常：${error.message}`);
     });
     startAutoClaimScheduler();
   })

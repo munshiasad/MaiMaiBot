@@ -66,6 +66,16 @@ function normalizeGlobal(globalState) {
     changed = true;
   }
 
+  if (!normalized.admin || typeof normalized.admin !== "object") {
+    normalized.admin = {};
+    changed = true;
+  }
+
+  if (typeof normalized.admin.errorPushEnabled !== "boolean") {
+    normalized.admin.errorPushEnabled = false;
+    changed = true;
+  }
+
   if (changed) {
     store.global = normalized;
     saveStore(store);
