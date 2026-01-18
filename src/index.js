@@ -588,6 +588,34 @@ function parseCommandArgs(ctx) {
   return text.split(/\s+/).slice(1).filter(Boolean);
 }
 
+function formatTimestamp(ms, timeZone) {
+  if (!ms) {
+    return "无";
+  }
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) {
+    return "无";
+  }
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  });
+  const parts = formatter.formatToParts(date);
+  const map = {};
+  for (const part of parts) {
+    if (part.type !== "literal") {
+      map[part.type] = part.value;
+    }
+  }
+  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
+}
+
 function getAdminSettings() {
   const state = getGlobalState();
   return state.admin || {};
@@ -986,7 +1014,7 @@ bot.command("admin", (ctx) => {
     return;
   }
   const args = parseCommandArgs(ctx);
-  const sub = args[0] ? args[0].toLowerCase() : "users";
+  const sub = args[0] ? args[0].toLowerCase() : "";
 
   if (sub === "notify" || sub === "push" || sub === "alert") {
     const setting = args[1] ? args[1].toLowerCase() : "";
@@ -1000,85 +1028,90 @@ bot.command("admin", (ctx) => {
     return;
   }
 
-  if (sub === "status") {
+  if (
+    !sub ||
+    sub === "summary" ||
+    sub === "users" ||
+    sub === "stats" ||
+    sub === "count" ||
+    sub === "status"
+  ) {
     const today = getLocalDate(AUTO_CLAIM_TIMEZONE);
-    let enabledCount = 0;
-    let disabledCount = 0;
+    const users = allUsers();
+    const userCount = Object.keys(users).length;
+    let accountCount = 0;
+    let autoClaimEnabledCount = 0;
+    let autoClaimDisabledCount = 0;
     let doneCount = 0;
     let pendingCount = 0;
-    const users = allUsers();
+    let totalAutoClaimRuns = 0;
+    let totalManualClaimRuns = 0;
+    let totalCouponsClaimed = 0;
+
     for (const user of Object.values(users)) {
       const accounts = user.accounts || {};
-      for (const account of Object.values(accounts)) {
+      const entries = Object.values(accounts);
+      accountCount += entries.length;
+      for (const account of entries) {
         if (!account) {
           continue;
         }
         if (account.autoClaimEnabled) {
-          enabledCount += 1;
+          autoClaimEnabledCount += 1;
           if (account.lastAutoClaimDate === today) {
             doneCount += 1;
           } else {
             pendingCount += 1;
           }
         } else {
-          disabledCount += 1;
+          autoClaimDisabledCount += 1;
         }
       }
-    }
 
-    const burst = getActiveBurst();
-    const burstRemainingMs = burst ? Math.max(0, burst.endAt - Date.now()) : 0;
-    const burstRemainingMinutes = burst ? Math.ceil(burstRemainingMs / 60000) : 0;
-    const burstStatus = burst ? `进行中（剩余约 ${burstRemainingMinutes} 分钟）` : "无";
-
-    const errorPushStatus = isAdminErrorPushEnabled() ? "开" : "关";
-    ctx.reply(
-      [
-        "管理员状态：",
-        `自动领券开启账号数：${enabledCount}`,
-        `自动领券关闭账号数：${disabledCount}`,
-        `今日已执行账号数：${doneCount}`,
-        `今日待执行账号数：${pendingCount}`,
-        `Burst 窗口：${burstStatus}`,
-        `报错推送：${errorPushStatus}`
-      ].join("\n")
-    );
-    return;
-  }
-
-  if (sub === "users" || sub === "stats" || sub === "count") {
-    const users = allUsers();
-    const userCount = Object.keys(users).length;
-    let accountCount = 0;
-    let autoClaimEnabledCount = 0;
-    let totalAutoClaimRuns = 0;
-    let totalManualClaimRuns = 0;
-    let totalCouponsClaimed = 0;
-    for (const user of Object.values(users)) {
-      const accounts = user.accounts || {};
-      const entries = Object.values(accounts);
-      accountCount += entries.length;
-      autoClaimEnabledCount += entries.filter((account) => account && account.autoClaimEnabled).length;
       const stats = user.stats || {};
       totalAutoClaimRuns += Number(stats.autoClaimRuns) || 0;
       totalManualClaimRuns += Number(stats.manualClaimRuns) || 0;
       totalCouponsClaimed += Number(stats.couponsClaimed) || 0;
     }
+
+    const state = getGlobalState();
+    const lastRequestAt = formatTimestamp(state.lastAutoClaimRequestAt, AUTO_CLAIM_TIMEZONE);
+    const knownCouponsCount = state.knownCoupons ? Object.keys(state.knownCoupons).length : 0;
+
+    const burst = getActiveBurst();
+    const burstRemainingMs = burst ? Math.max(0, burst.endAt - Date.now()) : 0;
+    const burstRemainingMinutes = burst ? Math.ceil(burstRemainingMs / 60000) : 0;
+    const burstTriggeredAt = burst ? formatTimestamp(burst.startAt, AUTO_CLAIM_TIMEZONE) : "无";
+    const burstCouponCount = burst && Array.isArray(burst.couponIds) ? burst.couponIds.length : 0;
+    const burstStatus = burst
+      ? `进行中（剩余约 ${burstRemainingMinutes} 分钟，券 ${burstCouponCount} 张，触发 ${burstTriggeredAt}）`
+      : "无";
+
+    const errorPushStatus = isAdminErrorPushEnabled() ? "开" : "关";
+
     ctx.reply(
       [
-        "管理员统计：",
+        "管理员概览：",
         `用户数：${userCount}`,
         `账号数：${accountCount}`,
-        `已开启自动领券账号数：${autoClaimEnabledCount}`,
+        `自动领券开启账号数：${autoClaimEnabledCount}`,
+        `自动领券关闭账号数：${autoClaimDisabledCount}`,
+        `今日已执行账号数：${doneCount}`,
+        `今日待执行账号数：${pendingCount}`,
         `自动领券次数总计：${totalAutoClaimRuns}`,
         `手动领券次数总计：${totalManualClaimRuns}`,
-        `累计领取优惠券总计：${totalCouponsClaimed}`
+        `累计领取优惠券总计：${totalCouponsClaimed}`,
+        `已记录券 ID 数量：${knownCouponsCount}`,
+        `最近自动领券请求：${lastRequestAt}`,
+        `Burst 窗口：${burstStatus}`,
+        `报错推送：${errorPushStatus}`,
+        `调度配置：检查${AUTO_CLAIM_CHECK_MINUTES}分钟｜起始${AUTO_CLAIM_HOUR}点｜分散${AUTO_CLAIM_SPREAD_MINUTES}分钟｜每轮上限${AUTO_CLAIM_MAX_PER_SWEEP}｜间隔${AUTO_CLAIM_REQUEST_GAP_MS}ms｜Burst${GLOBAL_BURST_WINDOW_MINUTES}分钟/检查${GLOBAL_BURST_CHECK_SECONDS}s｜时区${AUTO_CLAIM_TIMEZONE}`
       ].join("\n")
     );
     return;
   }
 
-  ctx.reply("用法：/admin users | /admin status | /admin notify on|off");
+  ctx.reply("用法：/admin | /admin notify on|off");
 });
 
 function sendTokenGuide(ctx) {

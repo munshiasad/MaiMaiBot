@@ -49,8 +49,7 @@ npm start
 - `/status` - show account status
 - `/stats` - my claim stats
 - `/cleartoken` - clear all accounts
-- `/admin users` - admin stats (users/accounts/claim totals)
-- `/admin status` - admin auto-claim status (today done/pending)
+- `/admin` - admin summary (users/accounts/auto-claim status/claim totals/config)
 - `/admin notify on|off` - admin error push toggle
 
 ## Environment Variables
