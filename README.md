@@ -70,6 +70,8 @@ See `.env.example` for all options. Key variables:
 - `GLOBAL_BURST_WINDOW_MINUTES` (default: `30`)
 - `GLOBAL_BURST_CHECK_SECONDS` (default: `60`)
 - `ADMIN_TELEGRAM_IDS` (comma-separated Telegram user IDs)
+- `SWEEP_WATCHDOG_SECONDS` (default: `60`)
+- `SWEEP_STALE_MULTIPLIER` (default: `2`)
 
 ## Notes
 

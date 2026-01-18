@@ -33,6 +33,8 @@ const AUTO_CLAIM_MAX_PER_SWEEP = Number(process.env.AUTO_CLAIM_MAX_PER_SWEEP || 
 const AUTO_CLAIM_REQUEST_GAP_MS = Number(process.env.AUTO_CLAIM_REQUEST_GAP_MS || 1500);
 const GLOBAL_BURST_WINDOW_MINUTES = Number(process.env.GLOBAL_BURST_WINDOW_MINUTES || 30);
 const GLOBAL_BURST_CHECK_SECONDS = Number(process.env.GLOBAL_BURST_CHECK_SECONDS || 60);
+const SWEEP_WATCHDOG_SECONDS = Number(process.env.SWEEP_WATCHDOG_SECONDS || 60);
+const SWEEP_STALE_MULTIPLIER = Number(process.env.SWEEP_STALE_MULTIPLIER || 2);
 const ADMIN_TELEGRAM_IDS = new Set(
   (process.env.ADMIN_TELEGRAM_IDS || "")
     .split(",")
@@ -45,6 +47,7 @@ const telegraphCache = new TTLCache(CACHE_TTL_SECONDS * 1000);
 const bot = new Telegraf(BOT_TOKEN);
 let autoClaimInterval = null;
 let burstInterval = null;
+let watchdogInterval = null;
 
 const TOKEN_GUIDE_MESSAGE = [
   "先获取麦当劳 MCP Token：",
@@ -826,7 +829,14 @@ async function callToolWithToken(token, toolName, args) {
 
 bot.catch((error, ctx) => {
   console.error("Bot error", error);
-  notifyAdmins(`Bot 运行异常：${error.message}`);
+  const message = error && error.message ? error.message : "";
+  const isOldQueryError =
+    message.includes("query is too old") ||
+    message.includes("response timeout expired") ||
+    (error.description && error.description.includes("query is too old"));
+  if (!isOldQueryError) {
+    notifyAdmins(`Bot 运行异常：${message}`);
+  }
   if (ctx && ctx.reply) {
     ctx.reply("出错了，请稍后再试。");
   }
@@ -1693,6 +1703,29 @@ function startAutoClaimScheduler() {
   autoClaimInterval = setInterval(trigger, AUTO_CLAIM_CHECK_MINUTES * 60 * 1000);
 }
 
+function startSweepWatchdog() {
+  if (!SWEEP_WATCHDOG_SECONDS || SWEEP_WATCHDOG_SECONDS <= 0) {
+    return;
+  }
+  const check = () => {
+    const state = getGlobalState();
+    const lastFinished = state.lastSweepFinishedAt || state.lastSweepStartedAt || 0;
+    const staleAfterMs =
+      Math.max(AUTO_CLAIM_CHECK_MINUTES || 1, 1) * 60 * 1000 * Math.max(SWEEP_STALE_MULTIPLIER || 1, 1);
+    const now = Date.now();
+    const isStale = !autoClaimSweepInProgress && now - lastFinished > staleAfterMs;
+    if (isStale) {
+      console.warn("Sweep watchdog: detected stale scheduler, triggering sweep now.");
+      runAutoClaimSweep().catch((error) => {
+        console.error("Sweep watchdog failed to trigger sweep", error);
+        notifyAdmins(`Sweep watchdog异常：${error.message}`);
+      });
+    }
+  };
+  check();
+  watchdogInterval = setInterval(check, SWEEP_WATCHDOG_SECONDS * 1000);
+}
+
 bot.launch()
   .then(() => {
     console.log("Bot started.");
@@ -1714,6 +1747,7 @@ bot.launch()
       console.error("Failed to set bot commands", error);
     });
     startAutoClaimScheduler();
+    startSweepWatchdog();
   })
   .catch((error) => {
     console.error("Bot failed to start.", error);
@@ -1728,6 +1762,10 @@ function shutdown(signal) {
   if (burstInterval) {
     clearInterval(burstInterval);
     burstInterval = null;
+  }
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
   }
   bot.stop(signal);
 }
