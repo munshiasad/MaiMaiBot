@@ -67,11 +67,11 @@ const ACCOUNT_HELP_MESSAGE = [
 const MAIN_MENU = Markup.inlineKeyboard([
   [Markup.button.callback("活动日历（本月）", "menu_calendar"), Markup.button.callback("可领优惠券", "menu_available")],
   [Markup.button.callback("一键领券", "menu_claim"), Markup.button.callback("我的优惠券", "menu_mycoupons")],
-  [Markup.button.callback("账号状态", "menu_status"), Markup.button.callback("账号管理", "menu_accounts")],
+  [Markup.button.callback("账号状态", "menu_status"), Markup.button.callback("我的统计", "menu_stats")],
+  [Markup.button.callback("账号管理", "menu_accounts"), Markup.button.callback("Token 获取指引", "menu_token_help")],
   [Markup.button.callback("开启自动领券", "menu_autoclaim_on"), Markup.button.callback("关闭自动领券", "menu_autoclaim_off")],
   [Markup.button.callback("开启成功汇报", "menu_report_success_on"), Markup.button.callback("关闭成功汇报", "menu_report_success_off")],
-  [Markup.button.callback("开启失败汇报", "menu_report_fail_on"), Markup.button.callback("关闭失败汇报", "menu_report_fail_off")],
-  [Markup.button.callback("Token 获取指引", "menu_token_help")]
+  [Markup.button.callback("开启失败汇报", "menu_report_fail_on"), Markup.button.callback("关闭失败汇报", "menu_report_fail_off")]
 ]);
 
 function chunkText(text, maxLength = 3500) {
@@ -924,7 +924,7 @@ function sendStatus(ctx) {
 
 bot.command("status", sendStatus);
 
-bot.command("stats", (ctx) => {
+function sendStats(ctx) {
   const userId = String(ctx.from.id);
   const user = getUser(userId);
   const stats = user && user.stats ? user.stats : { autoClaimRuns: 0, manualClaimRuns: 0, couponsClaimed: 0 };
@@ -936,7 +936,9 @@ bot.command("stats", (ctx) => {
       `累计领取优惠券：${stats.couponsClaimed || 0}`
     ].join("\n")
   );
-});
+}
+
+bot.command("stats", sendStats);
 
 bot.command("admin", (ctx) => {
   if (!ensureAdmin(ctx)) {
@@ -1195,6 +1197,11 @@ bot.action("menu_mycoupons", async (ctx) => {
 bot.action("menu_status", async (ctx) => {
   await ctx.answerCbQuery();
   sendStatus(ctx);
+});
+
+bot.action("menu_stats", async (ctx) => {
+  await ctx.answerCbQuery();
+  sendStats(ctx);
 });
 
 bot.action("menu_autoclaim_on", async (ctx) => {
