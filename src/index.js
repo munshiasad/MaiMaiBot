@@ -1887,6 +1887,9 @@ function startSweepWatchdog() {
   watchdogInterval = setInterval(check, SWEEP_WATCHDOG_SECONDS * 1000);
 }
 
+startAutoClaimScheduler();
+startSweepWatchdog();
+
 bot.launch()
   .then(() => {
     console.log("Bot started.");
@@ -1907,8 +1910,6 @@ bot.launch()
     ]).catch((error) => {
       console.error("Failed to set bot commands", error);
     });
-    startAutoClaimScheduler();
-    startSweepWatchdog();
   })
   .catch((error) => {
     console.error("Bot failed to start.", error);
