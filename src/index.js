@@ -1076,6 +1076,15 @@ bot.command("admin", (ctx) => {
 
     const state = getGlobalState();
     const lastRequestAt = formatTimestamp(state.lastAutoClaimRequestAt, AUTO_CLAIM_TIMEZONE);
+    const lastSweepStartedAt = formatTimestamp(state.lastSweepStartedAt, AUTO_CLAIM_TIMEZONE);
+    const lastSweepFinishedAt = formatTimestamp(state.lastSweepFinishedAt, AUTO_CLAIM_TIMEZONE);
+    const lastSweepDuration = state.lastSweepDurationMs
+      ? `${Math.round(state.lastSweepDurationMs / 1000)}秒`
+      : "无";
+    const lastSweepProcessed = Number(state.lastSweepProcessed) || 0;
+    const lastSweepEligible = Number(state.lastSweepEligible) || 0;
+    const lastSweepReason = state.lastSweepReason || "无";
+    const lastSweepError = state.lastSweepError || "无";
     const knownCouponsCount = state.knownCoupons ? Object.keys(state.knownCoupons).length : 0;
 
     const burst = getActiveBurst();
@@ -1103,6 +1112,9 @@ bot.command("admin", (ctx) => {
         `累计领取优惠券总计：${totalCouponsClaimed}`,
         `已记录券 ID 数量：${knownCouponsCount}`,
         `最近自动领券请求：${lastRequestAt}`,
+        `最近 Sweep：开始 ${lastSweepStartedAt} ｜结束 ${lastSweepFinishedAt} ｜耗时 ${lastSweepDuration} ｜原因 ${lastSweepReason}`,
+        `Sweep 进度：符合 ${lastSweepEligible} ｜已处理 ${lastSweepProcessed} ｜状态 ${autoClaimSweepInProgress ? "运行中" : "空闲"}`,
+        `Sweep 错误：${lastSweepError}`,
         `Burst 窗口：${burstStatus}`,
         `报错推送：${errorPushStatus}`,
         `调度配置：检查${AUTO_CLAIM_CHECK_MINUTES}分钟｜起始${AUTO_CLAIM_HOUR}点｜分散${AUTO_CLAIM_SPREAD_MINUTES}分钟｜每轮上限${AUTO_CLAIM_MAX_PER_SWEEP}｜间隔${AUTO_CLAIM_REQUEST_GAP_MS}ms｜Burst${GLOBAL_BURST_WINDOW_MINUTES}分钟/检查${GLOBAL_BURST_CHECK_SECONDS}s｜时区${AUTO_CLAIM_TIMEZONE}`
@@ -1464,6 +1476,12 @@ async function runAutoClaimSweep() {
   }
   autoClaimSweepInProgress = true;
 
+  const sweepStartedAt = Date.now();
+  let sweepEligible = 0;
+  let sweepProcessed = 0;
+  let sweepReason = "";
+  let sweepError = "";
+
   try {
     const users = allUsers();
     const nowMs = Date.now();
@@ -1476,6 +1494,7 @@ async function runAutoClaimSweep() {
     }
 
     const tasks = [];
+    sweepReason = burst ? "burst" : "daily";
 
     for (const [userId, user] of Object.entries(users)) {
       const accounts = user.accounts || {};
@@ -1522,6 +1541,17 @@ async function runAutoClaimSweep() {
         });
       }
     }
+
+    sweepEligible = tasks.length;
+    updateGlobalState({
+      lastSweepStartedAt: sweepStartedAt,
+      lastSweepReason: sweepReason,
+      lastSweepEligible: sweepEligible,
+      lastSweepProcessed: 0,
+      lastSweepFinishedAt: 0,
+      lastSweepDurationMs: 0,
+      lastSweepError: ""
+    });
 
     if (tasks.length === 0) {
       return;
@@ -1594,6 +1624,7 @@ async function runAutoClaimSweep() {
           lastBurstId: task.reason === "burst" ? burst.id : task.account.lastBurstId
         });
 
+        sweepError = error.message || sweepError;
         await notifyAdmins(
           `自动领券失败（${today}）- 账号：${task.displayName}\n原因：${error.message}`
         );
@@ -1611,9 +1642,23 @@ async function runAutoClaimSweep() {
       } finally {
         autoClaimInProgress.delete(taskKey);
         remaining -= 1;
+        sweepProcessed += 1;
       }
     }
+  } catch (error) {
+    sweepError = error && error.message ? error.message : "未知错误";
+    throw error;
   } finally {
+    const finishedAt = Date.now();
+    updateGlobalState({
+      lastSweepStartedAt: sweepStartedAt,
+      lastSweepFinishedAt: finishedAt,
+      lastSweepDurationMs: finishedAt - sweepStartedAt,
+      lastSweepEligible: sweepEligible,
+      lastSweepProcessed: sweepProcessed,
+      lastSweepReason: sweepReason,
+      lastSweepError: sweepError
+    });
     autoClaimSweepInProgress = false;
   }
 }

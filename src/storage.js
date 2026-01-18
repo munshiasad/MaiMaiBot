@@ -66,6 +66,35 @@ function normalizeGlobal(globalState) {
     changed = true;
   }
 
+  if (typeof normalized.lastSweepStartedAt !== "number") {
+    normalized.lastSweepStartedAt = 0;
+    changed = true;
+  }
+  if (typeof normalized.lastSweepFinishedAt !== "number") {
+    normalized.lastSweepFinishedAt = 0;
+    changed = true;
+  }
+  if (typeof normalized.lastSweepDurationMs !== "number") {
+    normalized.lastSweepDurationMs = 0;
+    changed = true;
+  }
+  if (typeof normalized.lastSweepEligible !== "number") {
+    normalized.lastSweepEligible = 0;
+    changed = true;
+  }
+  if (typeof normalized.lastSweepProcessed !== "number") {
+    normalized.lastSweepProcessed = 0;
+    changed = true;
+  }
+  if (typeof normalized.lastSweepReason !== "string") {
+    normalized.lastSweepReason = "";
+    changed = true;
+  }
+  if (typeof normalized.lastSweepError !== "string") {
+    normalized.lastSweepError = "";
+    changed = true;
+  }
+
   if (!normalized.admin || typeof normalized.admin !== "object") {
     normalized.admin = {};
     changed = true;
