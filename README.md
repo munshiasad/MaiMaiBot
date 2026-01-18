@@ -67,11 +67,13 @@ See `.env.example` for all options. Key variables:
 - `AUTO_CLAIM_SPREAD_MINUTES` (default: `600`)
 - `AUTO_CLAIM_MAX_PER_SWEEP` (default: `10`)
 - `AUTO_CLAIM_REQUEST_GAP_MS` (default: `1500`)
+- `AUTO_CLAIM_SPREAD_RERUN_MINUTES` (default: `120`)
 - `GLOBAL_BURST_WINDOW_MINUTES` (default: `30`)
 - `GLOBAL_BURST_CHECK_SECONDS` (default: `60`)
 - `ADMIN_TELEGRAM_IDS` (comma-separated Telegram user IDs)
 - `SWEEP_WATCHDOG_SECONDS` (default: `60`)
 - `SWEEP_STALE_MULTIPLIER` (default: `2`)
+- `AUTO_CLAIM_DEBUG` (default: `false`, set to `true`/`1` to enable verbose auto-claim logs)
 
 ## Notes
 

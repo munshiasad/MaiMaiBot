@@ -7,6 +7,63 @@ const { getUser, getGlobalState, updateGlobalState, upsertUser, deleteUser, allU
 const { getLocalDate, getMinutesSinceMidnight, getLocalDateTime } = require("./time");
 const { createTelegraphPage } = require("./telegraph");
 
+function readNumberEnv(key, fallback, options = {}) {
+  const raw = process.env[key];
+  if (raw === undefined || raw === null || raw === "") {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    console.warn(`Invalid ${key}=${raw}, using default ${fallback}.`);
+    return fallback;
+  }
+  let value = parsed;
+  if (Number.isFinite(options.min) && value < options.min) {
+    console.warn(`Clamping ${key}=${parsed} to min ${options.min}.`);
+    value = options.min;
+  }
+  if (Number.isFinite(options.max) && value > options.max) {
+    console.warn(`Clamping ${key}=${parsed} to max ${options.max}.`);
+    value = options.max;
+  }
+  return value;
+}
+
+function readBooleanEnv(key, fallback = false) {
+  const raw = process.env[key];
+  if (raw === undefined || raw === null || raw === "") {
+    return fallback;
+  }
+  const normalized = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function normalizeHour(value, fallback) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  if (value === 24) {
+    console.warn("AUTO_CLAIM_HOUR=24 treated as 0 (midnight).");
+    return 0;
+  }
+  if (value < 0) {
+    console.warn(`AUTO_CLAIM_HOUR ${value} < 0, clamping to 0.`);
+    return 0;
+  }
+  if (value > 24) {
+    const wrapped = value % 24;
+    console.warn(`AUTO_CLAIM_HOUR ${value} > 24, wrapping to ${wrapped}.`);
+    return wrapped;
+  }
+  return value;
+}
+
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN in environment.");
@@ -15,9 +72,9 @@ if (!BOT_TOKEN) {
 
 const MCP_URL = process.env.MCD_MCP_URL || "https://mcp.mcd.cn/mcp-servers/mcd-mcp";
 const MCP_PROTOCOL_VERSION = process.env.MCP_PROTOCOL_VERSION || "2025-06-18";
-const MCP_REQUEST_TIMEOUT_MS = Number(process.env.MCP_REQUEST_TIMEOUT_MS || 30000);
+const MCP_REQUEST_TIMEOUT_MS = readNumberEnv("MCP_REQUEST_TIMEOUT_MS", 30000, { min: 0 });
 
-const CACHE_TTL_SECONDS = Number(process.env.CACHE_TTL_SECONDS || 300);
+const CACHE_TTL_SECONDS = readNumberEnv("CACHE_TTL_SECONDS", 300, { min: 0 });
 const CACHEABLE_TOOLS = new Set(
   (process.env.CACHEABLE_TOOLS || "campaign-calender,available-coupons")
     .split(",")
@@ -25,16 +82,18 @@ const CACHEABLE_TOOLS = new Set(
     .filter(Boolean)
 );
 
-const AUTO_CLAIM_CHECK_MINUTES = Number(process.env.AUTO_CLAIM_CHECK_MINUTES || 10);
-const AUTO_CLAIM_HOUR = Number(process.env.AUTO_CLAIM_HOUR || 9);
+const AUTO_CLAIM_CHECK_MINUTES = readNumberEnv("AUTO_CLAIM_CHECK_MINUTES", 10, { min: 0 });
+const AUTO_CLAIM_HOUR = normalizeHour(readNumberEnv("AUTO_CLAIM_HOUR", 9), 9);
 const AUTO_CLAIM_TIMEZONE = process.env.AUTO_CLAIM_TIMEZONE || "Asia/Shanghai";
-const AUTO_CLAIM_SPREAD_MINUTES = Number(process.env.AUTO_CLAIM_SPREAD_MINUTES || 600);
-const AUTO_CLAIM_MAX_PER_SWEEP = Number(process.env.AUTO_CLAIM_MAX_PER_SWEEP || 10);
-const AUTO_CLAIM_REQUEST_GAP_MS = Number(process.env.AUTO_CLAIM_REQUEST_GAP_MS || 1500);
-const GLOBAL_BURST_WINDOW_MINUTES = Number(process.env.GLOBAL_BURST_WINDOW_MINUTES || 30);
-const GLOBAL_BURST_CHECK_SECONDS = Number(process.env.GLOBAL_BURST_CHECK_SECONDS || 60);
-const SWEEP_WATCHDOG_SECONDS = Number(process.env.SWEEP_WATCHDOG_SECONDS || 60);
-const SWEEP_STALE_MULTIPLIER = Number(process.env.SWEEP_STALE_MULTIPLIER || 2);
+const AUTO_CLAIM_SPREAD_MINUTES = readNumberEnv("AUTO_CLAIM_SPREAD_MINUTES", 600, { min: 0 });
+const AUTO_CLAIM_SPREAD_RERUN_MINUTES = readNumberEnv("AUTO_CLAIM_SPREAD_RERUN_MINUTES", 120, { min: 0 });
+const AUTO_CLAIM_MAX_PER_SWEEP = readNumberEnv("AUTO_CLAIM_MAX_PER_SWEEP", 10, { min: 0 });
+const AUTO_CLAIM_REQUEST_GAP_MS = readNumberEnv("AUTO_CLAIM_REQUEST_GAP_MS", 1500, { min: 0 });
+const GLOBAL_BURST_WINDOW_MINUTES = readNumberEnv("GLOBAL_BURST_WINDOW_MINUTES", 30, { min: 0 });
+const GLOBAL_BURST_CHECK_SECONDS = readNumberEnv("GLOBAL_BURST_CHECK_SECONDS", 60, { min: 0 });
+const SWEEP_WATCHDOG_SECONDS = readNumberEnv("SWEEP_WATCHDOG_SECONDS", 60, { min: 0 });
+const SWEEP_STALE_MULTIPLIER = readNumberEnv("SWEEP_STALE_MULTIPLIER", 2, { min: 0 });
+const AUTO_CLAIM_DEBUG = readBooleanEnv("AUTO_CLAIM_DEBUG", false);
 const ADMIN_TELEGRAM_IDS = new Set(
   (process.env.ADMIN_TELEGRAM_IDS || "")
     .split(",")
@@ -48,6 +107,40 @@ const bot = new Telegraf(BOT_TOKEN);
 let autoClaimInterval = null;
 let burstInterval = null;
 let watchdogInterval = null;
+
+function logAutoClaim(message, extra) {
+  if (extra !== undefined) {
+    console.log(`[auto-claim] ${message}`, extra);
+    return;
+  }
+  console.log(`[auto-claim] ${message}`);
+}
+
+function logAutoClaimDebug(message, extra) {
+  if (!AUTO_CLAIM_DEBUG) {
+    return;
+  }
+  if (extra !== undefined) {
+    console.log(`[auto-claim][debug] ${message}`, extra);
+    return;
+  }
+  console.log(`[auto-claim][debug] ${message}`);
+}
+
+function formatMinutesSinceMidnight(minutes) {
+  if (!Number.isFinite(minutes)) {
+    return "unknown";
+  }
+  const hour = Math.floor(minutes / 60) % 24;
+  const minute = minutes % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function formatSkipStats(stats) {
+  return Object.entries(stats)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(", ");
+}
 
 const TOKEN_GUIDE_MESSAGE = [
   "先获取麦当劳 MCP Token：",
@@ -398,6 +491,7 @@ function recordClaimedCoupons(rawText, trigger) {
       burst
     });
     if (burst) {
+      logAutoClaim(`Burst window started: ${newCouponIds.length} new coupons, ${windowMinutes} minutes.`);
       ensureBurstScheduler(true);
     }
   }
@@ -1109,6 +1203,9 @@ bot.command("admin", (ctx) => {
       : "无";
 
     const errorPushStatus = isAdminErrorPushEnabled() ? "开" : "关";
+    const rerunWindow = AUTO_CLAIM_SPREAD_RERUN_MINUTES
+      ? `已执行账号 ${AUTO_CLAIM_SPREAD_RERUN_MINUTES} 分钟后允许重跑`
+      : "不重复执行";
 
     ctx.reply(
       [
@@ -1129,7 +1226,7 @@ bot.command("admin", (ctx) => {
         `Sweep 错误：${lastSweepError}`,
         `Burst 窗口：${burstStatus}`,
         `报错推送：${errorPushStatus}`,
-        `调度配置：检查${AUTO_CLAIM_CHECK_MINUTES}分钟｜起始${AUTO_CLAIM_HOUR}点｜分散${AUTO_CLAIM_SPREAD_MINUTES}分钟｜每轮上限${AUTO_CLAIM_MAX_PER_SWEEP}｜间隔${AUTO_CLAIM_REQUEST_GAP_MS}ms｜Burst${GLOBAL_BURST_WINDOW_MINUTES}分钟/检查${GLOBAL_BURST_CHECK_SECONDS}s｜时区${AUTO_CLAIM_TIMEZONE}`
+        `调度配置：检查${AUTO_CLAIM_CHECK_MINUTES}分钟｜起始${AUTO_CLAIM_HOUR}点｜分散${AUTO_CLAIM_SPREAD_MINUTES}分钟｜${rerunWindow}｜每轮上限${AUTO_CLAIM_MAX_PER_SWEEP}｜间隔${AUTO_CLAIM_REQUEST_GAP_MS}ms｜Burst${GLOBAL_BURST_WINDOW_MINUTES}分钟/检查${GLOBAL_BURST_CHECK_SECONDS}s｜时区${AUTO_CLAIM_TIMEZONE}`
       ].join("\n")
     );
     return;
@@ -1452,6 +1549,17 @@ function shouldRunAutoClaim(userId, accountId, today, nowMinutes) {
   return nowMinutes >= targetMinute;
 }
 
+function shouldRerunAutoClaim(account) {
+  if (!AUTO_CLAIM_SPREAD_RERUN_MINUTES || AUTO_CLAIM_SPREAD_RERUN_MINUTES <= 0) {
+    return false;
+  }
+  const lastRerunAt = account.lastRerunAt || 0;
+  if (!lastRerunAt) {
+    return true;
+  }
+  return Date.now() - lastRerunAt >= AUTO_CLAIM_SPREAD_RERUN_MINUTES * 60 * 1000;
+}
+
 function getActiveBurst() {
   const state = getGlobalState();
   const burst = state.burst;
@@ -1491,12 +1599,14 @@ function ensureBurstScheduler(enabled) {
     if (burstInterval) {
       clearInterval(burstInterval);
       burstInterval = null;
+      logAutoClaim("Burst scheduler stopped.");
     }
     return;
   }
   if (burstInterval) {
     return;
   }
+  logAutoClaim(`Burst scheduler started: every ${GLOBAL_BURST_CHECK_SECONDS} seconds.`);
   burstInterval = setInterval(() => {
     runAutoClaimSweep().catch((error) => {
       console.error("Burst auto-claim sweep failed", error);
@@ -1507,6 +1617,7 @@ function ensureBurstScheduler(enabled) {
 
 async function runAutoClaimSweep() {
   if (autoClaimSweepInProgress) {
+    logAutoClaimDebug("Sweep skipped: already in progress.");
     return;
   }
   autoClaimSweepInProgress = true;
@@ -1531,41 +1642,73 @@ async function runAutoClaimSweep() {
     }
 
     const tasks = [];
+    const skipStats = {
+      missingToken: 0,
+      autoClaimDisabled: 0,
+      burstAlreadyRan: 0,
+      burstNotReady: 0,
+      dailyAlreadyRan: 0,
+      dailyNotDue: 0,
+      inProgress: 0
+    };
+    let nextDailyTarget = null;
+    let nextBurstTarget = null;
+
+    logAutoClaimDebug(
+      `Sweep start: reason=${sweepReason}, now=${new Date(nowMs).toISOString()}, today=${today}, now=${formatMinutesSinceMidnight(nowMinutes)}`
+    );
 
     for (const [userId, user] of Object.entries(users)) {
       const accounts = user.accounts || {};
       for (const [accountId, account] of Object.entries(accounts)) {
         if (!account || !account.token) {
+          skipStats.missingToken += 1;
           continue;
         }
         if (!account.autoClaimEnabled) {
+          skipStats.autoClaimDisabled += 1;
           continue;
         }
 
+        let targetMinute = null;
+        let targetAt = null;
+
         if (burst) {
           if (account.lastBurstId === burst.id) {
+            skipStats.burstAlreadyRan += 1;
             continue;
           }
-          if (!shouldRunBurst(userId, accountId, burst, nowMs)) {
+          targetAt = getBurstTargetAt(userId, accountId, burst);
+          if (nowMs < burst.startAt || nowMs > burst.endAt || nowMs < targetAt) {
+            skipStats.burstNotReady += 1;
+            if (Number.isFinite(targetAt) && (nextBurstTarget === null || targetAt < nextBurstTarget)) {
+              nextBurstTarget = targetAt;
+            }
             continue;
           }
         } else {
-          if (account.lastAutoClaimDate === today) {
+          const ranToday = account.lastAutoClaimDate === today;
+          if (ranToday && !shouldRerunAutoClaim(account)) {
+            skipStats.dailyAlreadyRan += 1;
             continue;
           }
-          if (!shouldRunAutoClaim(userId, accountId, today, nowMinutes)) {
+          targetMinute = getDailyTargetMinute(userId, accountId, today);
+          if (nowMinutes < targetMinute) {
+            skipStats.dailyNotDue += 1;
+            if (nextDailyTarget === null || targetMinute < nextDailyTarget) {
+              nextDailyTarget = targetMinute;
+            }
             continue;
           }
         }
 
         const taskKey = `${userId}:${accountId}`;
         if (autoClaimInProgress.has(taskKey)) {
+          skipStats.inProgress += 1;
           continue;
         }
 
         const displayName = getAccountDisplayName(accountId, account);
-        const targetMinute = burst ? null : getDailyTargetMinute(userId, accountId, today);
-        const targetAt = burst ? getBurstTargetAt(userId, accountId, burst) : null;
         tasks.push({
           userId,
           accountId,
@@ -1579,6 +1722,9 @@ async function runAutoClaimSweep() {
     }
 
     sweepEligible = tasks.length;
+    logAutoClaimDebug(
+      `Sweep eligibility: eligible=${sweepEligible}, skipped=${formatSkipStats(skipStats)}, nextDaily=${nextDailyTarget === null ? "n/a" : formatMinutesSinceMidnight(nextDailyTarget)}, nextBurst=${nextBurstTarget === null ? "n/a" : new Date(nextBurstTarget).toISOString()}`
+    );
     if (tasks.length === 0) {
       return;
     }
@@ -1636,21 +1782,27 @@ async function runAutoClaimSweep() {
         if (task.account.autoClaimReportSuccess !== false && claimed) {
           await sendLongMessageToUser(task.userId, message);
         }
+        logAutoClaimDebug(
+          `Auto-claim success: account=${task.displayName}, claimed=${claimed ? claimedCount : 0}`
+        );
         updateAccount(task.userId, task.accountId, {
           lastAutoClaimDate: today,
           lastAutoClaimAt: getLocalDateTime(AUTO_CLAIM_TIMEZONE),
           lastAutoClaimStatus: "成功",
-          lastBurstId: task.reason === "burst" ? burst.id : task.account.lastBurstId
+          lastBurstId: task.reason === "burst" ? burst.id : task.account.lastBurstId,
+          lastRerunAt: Date.now()
         });
       } catch (error) {
         updateAccount(task.userId, task.accountId, {
           lastAutoClaimDate: today,
           lastAutoClaimAt: getLocalDateTime(AUTO_CLAIM_TIMEZONE),
           lastAutoClaimStatus: `失败：${error.message}`,
-          lastBurstId: task.reason === "burst" ? burst.id : task.account.lastBurstId
+          lastBurstId: task.reason === "burst" ? burst.id : task.account.lastBurstId,
+          lastRerunAt: Date.now()
         });
 
         sweepError = error.message || sweepError;
+        logAutoClaim(`Auto-claim failed: account=${task.displayName}, error=${error.message}`);
         await notifyAdmins(
           `自动领券失败（${today}）- 账号：${task.displayName}\n原因：${error.message}`
         );
@@ -1686,14 +1838,20 @@ async function runAutoClaimSweep() {
       lastSweepError: sweepError
     });
     autoClaimSweepInProgress = false;
+    logAutoClaim(
+      `Sweep finished: reason=${sweepReason}, eligible=${sweepEligible}, processed=${sweepProcessed}, durationMs=${finishedAt - sweepStartedAt}, error=${sweepError || "none"}`
+    );
   }
 }
 
 function startAutoClaimScheduler() {
   if (!AUTO_CLAIM_CHECK_MINUTES || AUTO_CLAIM_CHECK_MINUTES <= 0) {
+    logAutoClaim("Scheduler disabled: AUTO_CLAIM_CHECK_MINUTES <= 0.");
     return;
   }
+  logAutoClaim(`Scheduler started: every ${AUTO_CLAIM_CHECK_MINUTES} minutes.`);
   const trigger = () => {
+    logAutoClaimDebug("Scheduler trigger fired.");
     runAutoClaimSweep().catch((error) => {
       console.error("Auto-claim sweep failed", error);
       notifyAdmins(`自动领券调度异常：${error.message}`);
@@ -1705,8 +1863,10 @@ function startAutoClaimScheduler() {
 
 function startSweepWatchdog() {
   if (!SWEEP_WATCHDOG_SECONDS || SWEEP_WATCHDOG_SECONDS <= 0) {
+    logAutoClaim("Sweep watchdog disabled: SWEEP_WATCHDOG_SECONDS <= 0.");
     return;
   }
+  logAutoClaim(`Sweep watchdog started: every ${SWEEP_WATCHDOG_SECONDS} seconds.`);
   const check = () => {
     const state = getGlobalState();
     const lastFinished = state.lastSweepFinishedAt || state.lastSweepStartedAt || 0;
@@ -1716,6 +1876,7 @@ function startSweepWatchdog() {
     const isStale = !autoClaimSweepInProgress && now - lastFinished > staleAfterMs;
     if (isStale) {
       console.warn("Sweep watchdog: detected stale scheduler, triggering sweep now.");
+      logAutoClaim("Sweep watchdog triggered: scheduler stale, running sweep.");
       runAutoClaimSweep().catch((error) => {
         console.error("Sweep watchdog failed to trigger sweep", error);
         notifyAdmins(`Sweep watchdog异常：${error.message}`);

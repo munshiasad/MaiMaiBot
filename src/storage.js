@@ -66,6 +66,11 @@ function normalizeGlobal(globalState) {
     changed = true;
   }
 
+  if (typeof normalized.lastRerunAt !== "number") {
+    normalized.lastRerunAt = 0;
+    changed = true;
+  }
+
   if (typeof normalized.lastSweepStartedAt !== "number") {
     normalized.lastSweepStartedAt = 0;
     changed = true;
