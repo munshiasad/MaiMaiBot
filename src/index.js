@@ -339,6 +339,42 @@ function normalizeCouponListText(rawText) {
   return normalizeToolText(rawText, { removeClaimStatus: true });
 }
 
+function normalizeMyCouponsText(rawText) {
+  const text = normalizeToolText(rawText);
+  if (!text) {
+    return "";
+  }
+  const lines = text.split("\n");
+  const cleaned = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      cleaned.push(line);
+      continue;
+    }
+    if (/^您的优惠券列表/.test(trimmed)) {
+      continue;
+    }
+    if (/^共\s*\d+\s*张可用优惠券/.test(trimmed)) {
+      continue;
+    }
+    if (
+      /张可用优惠券/.test(trimmed) &&
+      (/第\s*\d+\s*\/\s*\d+\s*页/.test(trimmed) || /每页\s*\d+\s*条/.test(trimmed))
+    ) {
+      continue;
+    }
+    if (/^图片[:：]/i.test(trimmed) || /图片内容已省略/.test(trimmed)) {
+      continue;
+    }
+    if (/^https?:\/\/\S+\.(png|jpe?g|webp|gif)(\?\S*)?$/i.test(trimmed)) {
+      continue;
+    }
+    cleaned.push(line);
+  }
+  return cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function simplifyClaimResultText(text) {
   if (!text) {
     return "";
@@ -848,6 +884,18 @@ function resolveAccount(userId, accountId) {
   return { user, accountId: resolvedId, account };
 }
 
+function getAccountInfo(userId, accountId) {
+  const user = getUser(userId);
+  if (!user || !user.accounts || !user.accounts[accountId]) {
+    return null;
+  }
+  const account = user.accounts[accountId];
+  if (!account || !account.token) {
+    return null;
+  }
+  return { userId, accountId, account, displayName: getAccountDisplayName(accountId, account) };
+}
+
 function ensureAccount(ctx, accountId) {
   const userId = String(ctx.from.id);
   const info = resolveAccount(userId, accountId);
@@ -889,7 +937,7 @@ function addOrUpdateAccount(userId, accountId, token, label) {
   accounts[accountId] = updated;
   const activeAccountId = user.activeAccountId || accountId;
   upsertUser(userId, { accounts, activeAccountId });
-  return existing && existing.token;
+  return { existed: Boolean(existing && existing.token), isNewAccount };
 }
 
 function updateAccount(userId, accountId, updates) {
@@ -1051,7 +1099,8 @@ async function handleAccountCommand(ctx, args) {
       ctx.reply(`账号 ${accountId} Token 无效或已失效，请重新获取。`);
       return;
     }
-    const existed = addOrUpdateAccount(userId, accountId, token, accountId);
+    const result = addOrUpdateAccount(userId, accountId, token, accountId);
+    const { existed, isNewAccount } = result;
     if (!validation.ok) {
       ctx.reply(
         `${existed ? "账号已更新" : "账号已添加"}，但暂时无法验证 Token：${validation.message}`
@@ -1059,6 +1108,14 @@ async function handleAccountCommand(ctx, args) {
       return;
     }
     ctx.reply(existed ? `账号 ${accountId} 已更新。` : `账号 ${accountId} 已添加。`);
+    if (isNewAccount) {
+      const info = getAccountInfo(userId, accountId);
+      if (info && info.account.autoClaimEnabled) {
+        runImmediateAutoClaim(ctx, info).catch((error) => {
+          console.error("Immediate auto-claim failed", error);
+        });
+      }
+    }
     return;
   }
 
@@ -1114,12 +1171,21 @@ bot.command(["token", "settoken"], async (ctx) => {
     ctx.reply("Token 无效或已失效，请重新获取。");
     return;
   }
-  const existed = addOrUpdateAccount(userId, accountId, token, accountId === "default" ? "默认账号" : accountId);
+  const result = addOrUpdateAccount(userId, accountId, token, accountId === "default" ? "默认账号" : accountId);
+  const { existed, isNewAccount } = result;
   if (!validation.ok) {
     ctx.reply(`${existed ? "Token 已更新" : "Token 已保存"}，但暂时无法验证：${validation.message}`);
     return;
   }
   ctx.reply(existed ? "Token 已更新，可以继续使用。" : "Token 已保存，可以开始使用指令了。");
+  if (isNewAccount) {
+    const info = getAccountInfo(userId, accountId);
+    if (info && info.account.autoClaimEnabled) {
+      runImmediateAutoClaim(ctx, info).catch((error) => {
+        console.error("Immediate auto-claim failed", error);
+      });
+    }
+  }
 });
 
 bot.command(["account", "accounts"], async (ctx) => {
@@ -1391,10 +1457,8 @@ async function sendTelegraphArticle(ctx, title, rawText, fallbackPrefix, cacheKe
     if (cacheKey) {
       const cached = telegraphCache.get(cacheKey);
       if (cached) {
-        const message = `${fallbackPrefix}：<a href="${escapeHtml(cached)}">点击查看</a>`;
-        await ctx.reply(message, {
-          disable_web_page_preview: false,
-          parse_mode: "HTML"
+        await ctx.reply(cached, {
+          disable_web_page_preview: false
         });
         return;
       }
@@ -1404,13 +1468,12 @@ async function sendTelegraphArticle(ctx, title, rawText, fallbackPrefix, cacheKe
     if (cacheKey) {
       telegraphCache.set(cacheKey, url);
     }
-    const message = `${fallbackPrefix}：<a href="${escapeHtml(url)}">点击查看</a>`;
-    await ctx.reply(message, {
-      disable_web_page_preview: false,
-      parse_mode: "HTML"
+    await ctx.reply(url, {
+      disable_web_page_preview: false
     });
   } catch (error) {
-    const warning = `${fallbackPrefix} Telegraph 生成失败，已改用文本展示：${error.message}`;
+    const label = fallbackPrefix || title || "内容";
+    const warning = `${label} Telegraph 生成失败，已改用文本展示：${error.message}`;
     await sendLongMessage(ctx, warning + "\n\n" + formatTelegramHtml(stripImagesFromText(rawText)));
   }
 }
@@ -1434,7 +1497,7 @@ async function handleCalendar(ctx, specifiedDate) {
     const cleaned = normalizeCalendarText(rawText);
     const title = specifiedDate ? `麦当劳活动日历（${specifiedDate}）` : "麦当劳活动日历";
     const cacheKey = getToolCacheKey("campaign-calender", args);
-    await sendTelegraphArticle(ctx, title, cleaned, "活动日历已生成", cacheKey);
+    await sendTelegraphArticle(ctx, title, cleaned, "活动日历", cacheKey);
   } catch (error) {
     ctx.reply(`活动日历查询失败：${error.message}`);
   }
@@ -1449,7 +1512,7 @@ async function handleAvailableCoupons(ctx) {
     const rawText = getToolRawText(result);
     const cleaned = normalizeCouponListText(rawText);
     const cacheKey = getToolCacheKey("available-coupons", {});
-    await sendTelegraphArticle(ctx, "麦麦省优惠券列表", cleaned, "优惠券列表已生成", cacheKey);
+    await sendTelegraphArticle(ctx, "麦麦省优惠券列表", cleaned, "优惠券列表", cacheKey);
   } catch (error) {
     ctx.reply(`优惠券列表查询失败：${error.message}`);
   }
@@ -1474,13 +1537,64 @@ async function handleClaimCoupons(ctx) {
   }
 }
 
+async function runImmediateAutoClaim(ctx, info) {
+  const taskKey = `${info.userId}:${info.accountId}`;
+  if (autoClaimInProgress.has(taskKey)) {
+    ctx.reply(`账号 ${info.displayName} 正在自动领券中，请稍后再试。`);
+    return;
+  }
+  autoClaimInProgress.add(taskKey);
+  const today = getLocalDate(AUTO_CLAIM_TIMEZONE);
+
+  try {
+    const result = await callToolWithToken(info.account.token, "auto-bind-coupons", {});
+    const rawText = getToolRawText(result);
+    const normalized = normalizeToolText(rawText);
+    const simplified = simplifyClaimResultText(normalized);
+    const claimedCount = getClaimedCouponCount(normalized);
+    recordClaimedCoupons(normalized, { userId: info.userId, accountId: info.accountId, reason: "enable" });
+    incrementUserStats(info.userId, { autoClaimRuns: 1, couponsClaimed: claimedCount });
+    updateAccount(info.userId, info.accountId, {
+      lastAutoClaimDate: today,
+      lastAutoClaimAt: getLocalDateTime(AUTO_CLAIM_TIMEZONE),
+      lastAutoClaimStatus: "成功",
+      lastRerunAt: Date.now()
+    });
+
+    const text = [
+      `自动领券结果（${today}）- 账号：${info.displayName}`,
+      "",
+      formatTelegramHtml(stripImagesFromText(simplified))
+    ].join("\n");
+    await sendLongMessage(ctx, text || "未返回数据。");
+  } catch (error) {
+    const message = error && error.message ? error.message : "未知错误";
+    const authFailure = isAuthFailureMessage(message);
+    const updates = {
+      lastAutoClaimDate: today,
+      lastAutoClaimAt: getLocalDateTime(AUTO_CLAIM_TIMEZONE),
+      lastAutoClaimStatus: `失败：${message}`,
+      lastRerunAt: Date.now()
+    };
+    if (authFailure) {
+      updates.lastAuthFailureNotifiedDate = today;
+    }
+    updateAccount(info.userId, info.accountId, updates);
+    ctx.reply(`自动领券失败（${today}）- 账号：${info.displayName}\n原因：${message}`);
+  } finally {
+    autoClaimInProgress.delete(taskKey);
+  }
+}
+
 async function handleMyCoupons(ctx) {
   const info = ensureAccount(ctx);
   if (!info) return;
 
   try {
     const result = await callToolWithToken(info.account.token, "my-coupons", {});
-    const text = formatToolResult(result);
+    const rawText = getToolRawText(result);
+    const normalized = normalizeMyCouponsText(rawText);
+    const text = formatTelegramHtml(stripImagesFromText(normalized));
     await sendLongMessage(ctx, text || "未返回数据。");
   } catch (error) {
     ctx.reply(`我的优惠券查询失败：${error.message}`);
@@ -1490,8 +1604,14 @@ async function handleMyCoupons(ctx) {
 function handleAutoClaimSetting(ctx, enabled, accountId) {
   const info = ensureAccount(ctx, accountId);
   if (!info) return;
+  const wasEnabled = Boolean(info.account.autoClaimEnabled);
   updateAccount(info.userId, info.accountId, { autoClaimEnabled: enabled });
   ctx.reply(`账号 ${info.displayName} 自动领券已${enabled ? "开启" : "关闭"}。`);
+  if (enabled && !wasEnabled) {
+    runImmediateAutoClaim(ctx, info).catch((error) => {
+      console.error("Immediate auto-claim failed", error);
+    });
+  }
 }
 
 function handleAutoClaimReportSetting(ctx, type, enabled, accountId) {
