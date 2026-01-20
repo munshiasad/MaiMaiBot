@@ -110,6 +110,44 @@ function normalizeGlobal(globalState) {
     changed = true;
   }
 
+  if (!normalized.mcpHealth || typeof normalized.mcpHealth !== "object") {
+    normalized.mcpHealth = {};
+    changed = true;
+  }
+
+  if (typeof normalized.mcpHealth.status !== "string") {
+    normalized.mcpHealth.status = "unknown";
+    changed = true;
+  }
+  if (typeof normalized.mcpHealth.lastCheckedAt !== "number") {
+    normalized.mcpHealth.lastCheckedAt = 0;
+    changed = true;
+  }
+  if (typeof normalized.mcpHealth.lastOkAt !== "number") {
+    normalized.mcpHealth.lastOkAt = 0;
+    changed = true;
+  }
+  if (typeof normalized.mcpHealth.lastErrorAt !== "number") {
+    normalized.mcpHealth.lastErrorAt = 0;
+    changed = true;
+  }
+  if (typeof normalized.mcpHealth.lastError !== "string") {
+    normalized.mcpHealth.lastError = "";
+    changed = true;
+  }
+  if (typeof normalized.mcpHealth.lastStatusCode !== "number") {
+    normalized.mcpHealth.lastStatusCode = 0;
+    changed = true;
+  }
+  if (typeof normalized.mcpHealth.consecutiveFailures !== "number") {
+    normalized.mcpHealth.consecutiveFailures = 0;
+    changed = true;
+  }
+  if (typeof normalized.mcpHealth.lastLatencyMs !== "number") {
+    normalized.mcpHealth.lastLatencyMs = 0;
+    changed = true;
+  }
+
   if (changed) {
     store.global = normalized;
     saveStore(store);

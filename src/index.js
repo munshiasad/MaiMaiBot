@@ -44,6 +44,21 @@ function readBooleanEnv(key, fallback = false) {
   return fallback;
 }
 
+function parseStatusCodeList(raw, fallback = []) {
+  const source = raw === undefined || raw === null ? "" : String(raw);
+  const values = source
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (values.length) {
+    return Array.from(new Set(values));
+  }
+  if (Array.isArray(fallback)) {
+    return Array.from(new Set(fallback.filter((value) => Number.isFinite(value) && value > 0)));
+  }
+  return [];
+}
+
 function normalizeHour(value, fallback) {
   if (!Number.isFinite(value)) {
     return fallback;
@@ -73,6 +88,32 @@ if (!BOT_TOKEN) {
 const MCP_URL = process.env.MCD_MCP_URL || "https://mcp.mcd.cn/mcp-servers/mcd-mcp";
 const MCP_PROTOCOL_VERSION = process.env.MCP_PROTOCOL_VERSION || "2025-06-18";
 const MCP_REQUEST_TIMEOUT_MS = readNumberEnv("MCP_REQUEST_TIMEOUT_MS", 30000, { min: 0 });
+const MCP_RETRY_MAX = readNumberEnv("MCP_RETRY_MAX", 2, { min: 0 });
+const MCP_RETRY_BASE_DELAY_MS = readNumberEnv("MCP_RETRY_BASE_DELAY_MS", 500, { min: 0 });
+const MCP_RETRY_MAX_DELAY_MS = readNumberEnv("MCP_RETRY_MAX_DELAY_MS", 5000, { min: 0 });
+const MCP_RETRY_JITTER_MS = readNumberEnv("MCP_RETRY_JITTER_MS", 200, { min: 0 });
+const MCP_RETRY_STATUS_CODES = parseStatusCodeList(process.env.MCP_RETRY_STATUS_CODES, [502, 503, 504]);
+const MCP_RETRY_ON_TIMEOUT = readBooleanEnv("MCP_RETRY_ON_TIMEOUT", true);
+const MCP_RETRY_ON_NETWORK_ERROR = readBooleanEnv("MCP_RETRY_ON_NETWORK_ERROR", true);
+const MCP_UPSTREAM_ERROR_MESSAGE = process.env.MCP_UPSTREAM_ERROR_MESSAGE || "上游故障";
+const MCP_HEALTH_CHECK_INTERVAL_MS = readNumberEnv("MCP_HEALTH_CHECK_INTERVAL_MS", 60000, { min: 0 });
+const MCP_HEALTH_CHECK_TIMEOUT_MS = readNumberEnv("MCP_HEALTH_CHECK_TIMEOUT_MS", 5000, { min: 0 });
+const MCP_HEALTH_FAILURE_THRESHOLD = readNumberEnv("MCP_HEALTH_FAILURE_THRESHOLD", 2, { min: 1 });
+const ACCOUNT_ID_MIN_LENGTH = readNumberEnv("ACCOUNT_ID_MIN_LENGTH", 1, { min: 1 });
+const ACCOUNT_ID_MAX_LENGTH = readNumberEnv("ACCOUNT_ID_MAX_LENGTH", 32, { min: 1 });
+const TOKEN_MIN_LENGTH = readNumberEnv("TOKEN_MIN_LENGTH", 16, { min: 1 });
+const TOKEN_MAX_LENGTH = readNumberEnv("TOKEN_MAX_LENGTH", 256, { min: 1 });
+const TOKEN_SET_RATE_LIMIT_MS = readNumberEnv("TOKEN_SET_RATE_LIMIT_MS", 30000, { min: 0 });
+const ACCOUNT_SET_RATE_LIMIT_MS = readNumberEnv("ACCOUNT_SET_RATE_LIMIT_MS", 30000, { min: 0 });
+const MCP_RETRY_OPTIONS = {
+  maxRetries: MCP_RETRY_MAX,
+  baseDelayMs: MCP_RETRY_BASE_DELAY_MS,
+  maxDelayMs: MCP_RETRY_MAX_DELAY_MS,
+  jitterMs: MCP_RETRY_JITTER_MS,
+  retryOnStatus: MCP_RETRY_STATUS_CODES,
+  retryOnTimeout: MCP_RETRY_ON_TIMEOUT,
+  retryOnNetworkError: MCP_RETRY_ON_NETWORK_ERROR
+};
 
 const CACHE_TTL_SECONDS = readNumberEnv("CACHE_TTL_SECONDS", 300, { min: 0 });
 const CACHEABLE_TOOLS = new Set(
@@ -107,6 +148,11 @@ const bot = new Telegraf(BOT_TOKEN);
 let autoClaimInterval = null;
 let burstInterval = null;
 let watchdogInterval = null;
+let mcpHealthInterval = null;
+const userRateLimits = new Map();
+
+const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9._\-\u4e00-\u9fff]+$/;
+const TOKEN_PATTERN = /^[A-Za-z0-9._=-]+$/;
 
 function logAutoClaim(message, extra) {
   if (extra !== undefined) {
@@ -203,6 +249,99 @@ function chunkText(text, maxLength = 3500) {
 
 function stripHtmlTags(text) {
   return text.replace(/<[^>]+>/g, "");
+}
+
+const CONTROL_CHARS_REGEX = /[\x00-\x1F\x7F]/g;
+const CONTROL_CHARS_KEEP_NEWLINE_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+
+function sanitizeInlineText(value, options = {}) {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  const maxLength = Number.isFinite(options.maxLength) ? options.maxLength : 300;
+  const keepNewlines = Boolean(options.keepNewlines);
+  let text = String(value);
+  text = keepNewlines
+    ? text.replace(CONTROL_CHARS_KEEP_NEWLINE_REGEX, "")
+    : text.replace(CONTROL_CHARS_REGEX, " ");
+  text = stripHtmlTags(text);
+  if (keepNewlines) {
+    text = text.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n");
+  } else {
+    text = text.replace(/\s+/g, " ");
+  }
+  text = text.trim();
+  if (maxLength > 0 && text.length > maxLength) {
+    text = text.slice(0, maxLength);
+  }
+  return text;
+}
+
+function maskToken(token, options = {}) {
+  const safe = sanitizeInlineText(token, { maxLength: 200 });
+  if (!safe) {
+    return "";
+  }
+  const visible = Number.isFinite(options.visible) ? Math.max(0, options.visible) : 4;
+  if (safe.length <= visible) {
+    return "*".repeat(Math.max(1, safe.length));
+  }
+  return `${"*".repeat(safe.length - visible)}${safe.slice(-visible)}`;
+}
+
+function validateAccountIdInput(accountId) {
+  const value = String(accountId || "").trim();
+  if (!value) {
+    return { ok: false, message: "账号名不能为空。" };
+  }
+  if (value.length < ACCOUNT_ID_MIN_LENGTH || value.length > ACCOUNT_ID_MAX_LENGTH) {
+    return {
+      ok: false,
+      message: `账号名长度需在 ${ACCOUNT_ID_MIN_LENGTH}-${ACCOUNT_ID_MAX_LENGTH} 之间。`
+    };
+  }
+  if (!ACCOUNT_ID_PATTERN.test(value)) {
+    return {
+      ok: false,
+      message: "账号名仅支持中文、字母、数字、点、下划线、连字符。"
+    };
+  }
+  return { ok: true, value };
+}
+
+function validateTokenInput(token) {
+  const value = String(token || "").trim();
+  if (!value) {
+    return { ok: false, message: "Token 不能为空。" };
+  }
+  if (value.length < TOKEN_MIN_LENGTH || value.length > TOKEN_MAX_LENGTH) {
+    return {
+      ok: false,
+      message: `Token 长度需在 ${TOKEN_MIN_LENGTH}-${TOKEN_MAX_LENGTH} 之间。`
+    };
+  }
+  if (!TOKEN_PATTERN.test(value)) {
+    return {
+      ok: false,
+      message: "Token 仅支持字母、数字、点、下划线、连字符和等号。"
+    };
+  }
+  return { ok: true, value };
+}
+
+function checkRateLimit(userId, action, intervalMs) {
+  if (!intervalMs || intervalMs <= 0) {
+    return { ok: true, waitMs: 0 };
+  }
+  const key = `${userId}:${action}`;
+  const now = Date.now();
+  const last = userRateLimits.get(key) || 0;
+  const elapsed = now - last;
+  if (elapsed >= intervalMs) {
+    userRateLimits.set(key, now);
+    return { ok: true, waitMs: 0 };
+  }
+  return { ok: false, waitMs: intervalMs - elapsed };
 }
 
 async function sendLongMessage(ctx, text, options = {}) {
@@ -487,6 +626,51 @@ function isAuthFailureMessage(message) {
   );
 }
 
+function getErrorMessage(error) {
+  if (!error) {
+    return "";
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error.message) {
+    return String(error.message);
+  }
+  return String(error);
+}
+
+function isUpstreamError(error) {
+  if (!error) {
+    return false;
+  }
+  if (error.isUpstream || error.isNetworkError || error.isTimeout) {
+    return true;
+  }
+  if (error.code === "MCP_TIMEOUT" || error.code === "MCP_NETWORK_ERROR") {
+    return true;
+  }
+  if (Number.isFinite(error.status)) {
+    return error.status >= 500;
+  }
+  const match = String(error.message || "").match(/MCP request failed \((\d+)\)/);
+  if (match) {
+    const status = Number(match[1]);
+    return Number.isFinite(status) && status >= 500;
+  }
+  return false;
+}
+
+function formatMcpErrorMessage(error) {
+  const rawMessage = getErrorMessage(error);
+  const authFailure = isAuthFailureMessage(rawMessage);
+  const upstreamFailure = isUpstreamError(error);
+  if (upstreamFailure || (!authFailure && isMcpDown())) {
+    return MCP_UPSTREAM_ERROR_MESSAGE;
+  }
+  const safe = sanitizeInlineText(rawMessage, { maxLength: 400 });
+  return safe || "未知错误";
+}
+
 function parseCouponIds(rawText) {
   if (!rawText) {
     return [];
@@ -648,6 +832,10 @@ function escapeHtml(text) {
     .replace(/\"/g, "&quot;");
 }
 
+function safeHtmlText(value, options = {}) {
+  return escapeHtml(sanitizeInlineText(value, options));
+}
+
 function parseInlineNodes(text) {
   if (!text) {
     return [""];
@@ -775,6 +963,86 @@ function formatCountWithDelta(value, baseline) {
   return `${current} ${formatSignedDelta(current - base)}`;
 }
 
+const MCP_HEALTH_STATUS = {
+  OK: "ok",
+  DEGRADED: "degraded",
+  DOWN: "down",
+  UNKNOWN: "unknown"
+};
+
+function getMcpHealth() {
+  const state = getGlobalState();
+  return state.mcpHealth || {
+    status: MCP_HEALTH_STATUS.UNKNOWN,
+    lastCheckedAt: 0,
+    lastOkAt: 0,
+    lastErrorAt: 0,
+    lastError: "",
+    lastStatusCode: 0,
+    consecutiveFailures: 0,
+    lastLatencyMs: 0
+  };
+}
+
+function updateMcpHealth(updates) {
+  const current = getMcpHealth();
+  const next = {
+    ...current,
+    ...updates
+  };
+  updateGlobalState({ mcpHealth: next });
+  return next;
+}
+
+function recordMcpSuccess(latencyMs, options = {}) {
+  const now = Date.now();
+  updateMcpHealth({
+    status: MCP_HEALTH_STATUS.OK,
+    lastCheckedAt: now,
+    lastOkAt: now,
+    lastErrorAt: 0,
+    lastError: "",
+    lastStatusCode: Number.isFinite(options.statusCode) ? options.statusCode : 0,
+    consecutiveFailures: 0,
+    lastLatencyMs: Number.isFinite(latencyMs) ? latencyMs : 0
+  });
+}
+
+function recordMcpFailure(error, options = {}) {
+  const now = Date.now();
+  const current = getMcpHealth();
+  const failures = (Number(current.consecutiveFailures) || 0) + 1;
+  const status =
+    failures >= MCP_HEALTH_FAILURE_THRESHOLD ? MCP_HEALTH_STATUS.DOWN : MCP_HEALTH_STATUS.DEGRADED;
+  updateMcpHealth({
+    status,
+    lastCheckedAt: now,
+    lastErrorAt: now,
+    lastError: sanitizeInlineText(getErrorMessage(error), { maxLength: 200 }),
+    lastStatusCode: Number.isFinite(options.statusCode) ? options.statusCode : 0,
+    consecutiveFailures: failures,
+    lastLatencyMs: Number.isFinite(options.latencyMs) ? options.latencyMs : 0
+  });
+}
+
+function isMcpDown() {
+  const health = getMcpHealth();
+  return health.status === MCP_HEALTH_STATUS.DOWN;
+}
+
+function formatMcpHealthStatus(status) {
+  if (status === MCP_HEALTH_STATUS.OK) {
+    return "正常";
+  }
+  if (status === MCP_HEALTH_STATUS.DEGRADED) {
+    return "不稳";
+  }
+  if (status === MCP_HEALTH_STATUS.DOWN) {
+    return "故障";
+  }
+  return "未知";
+}
+
 function getAdminSettings() {
   const state = getGlobalState();
   return state.admin || {};
@@ -822,28 +1090,37 @@ function ensureAdmin(ctx) {
 }
 
 function getAccountDisplayName(accountId, account) {
-  if (account && account.label) {
-    return account.label;
-  }
-  if (accountId === "default") {
-    return "默认账号";
-  }
-  return accountId;
+  const rawName = account && account.label
+    ? account.label
+    : accountId === "default"
+      ? "默认账号"
+      : accountId;
+  const safeName = sanitizeInlineText(rawName, { maxLength: 60 });
+  return safeName || (accountId === "default" ? "默认账号" : accountId);
 }
 
-function buildAccountListText(user) {
+function buildAccountListText(user, options = {}) {
   const entries = user && user.accounts ? Object.entries(user.accounts) : [];
   if (entries.length === 0) {
     return "暂无账号，请先使用 /account add 添加账号。";
   }
+  const includeAutoClaimStatus = Boolean(options.includeAutoClaimStatus);
   const lines = entries.map(([accountId, account]) => {
     const name = getAccountDisplayName(accountId, account);
+    const safeAccountId = sanitizeInlineText(accountId, { maxLength: 60 });
     const active = user.activeAccountId === accountId ? "✅" : "▫️";
     const autoClaim = account.autoClaimEnabled ? "开" : "关";
     const reportSuccess = account.autoClaimReportSuccess ? "开" : "关";
     const reportFail = account.autoClaimReportFailure ? "开" : "关";
-    const nameWithId = name === accountId ? name : `${name}（${accountId}）`;
-    return `${active} ${nameWithId} ｜自动领券:${autoClaim} ｜汇报(成):${reportSuccess} ｜汇报(败):${reportFail}`;
+    const nameWithId = name === safeAccountId ? name : `${name}（${safeAccountId}）`;
+    const lastAutoClaimAt = account.lastAutoClaimAt || "从未";
+    const lastAutoClaimStatus = account.lastAutoClaimStatus
+      ? sanitizeInlineText(account.lastAutoClaimStatus, { maxLength: 120 })
+      : "";
+    const autoClaimMeta = includeAutoClaimStatus
+      ? ` ｜上次:${lastAutoClaimAt}${lastAutoClaimStatus ? `｜状态:${lastAutoClaimStatus}` : ""}`
+      : "";
+    return `${active} ${nameWithId} ｜自动领券:${autoClaim} ｜汇报(成):${reportSuccess} ｜汇报(败):${reportFail}${autoClaimMeta}`;
   });
   return lines.join("\n");
 }
@@ -988,47 +1265,82 @@ async function callToolWithToken(token, toolName, args) {
     baseUrl: MCP_URL,
     token,
     protocolVersion: MCP_PROTOCOL_VERSION,
-    requestTimeoutMs: MCP_REQUEST_TIMEOUT_MS
+    requestTimeoutMs: MCP_REQUEST_TIMEOUT_MS,
+    retryOptions: MCP_RETRY_OPTIONS
   });
 
-  const result = await client.callTool(toolName, args || {});
-  if (useCache) {
-    cache.set(cacheKey, result);
+  const startedAt = Date.now();
+  try {
+    const result = await client.callTool(toolName, args || {});
+    recordMcpSuccess(Date.now() - startedAt);
+    if (useCache) {
+      cache.set(cacheKey, result);
+    }
+    return result;
+  } catch (error) {
+    const elapsedMs = Date.now() - startedAt;
+    const upstreamFailure = isUpstreamError(error);
+    if (upstreamFailure) {
+      recordMcpFailure(error, { statusCode: error.status, latencyMs: elapsedMs });
+    } else {
+      recordMcpSuccess(elapsedMs);
+    }
+    const safeMessage = formatMcpErrorMessage(error);
+    const wrapped = new Error(safeMessage);
+    if (error && error.code) {
+      wrapped.code = error.code;
+    }
+    if (Number.isFinite(error && error.status)) {
+      wrapped.status = error.status;
+    }
+    wrapped.isUpstream = upstreamFailure;
+    throw wrapped;
   }
-  return result;
 }
 
 async function validateToken(token) {
   if (!token) {
     return { ok: false, authFailure: true, message: "缺少 MCP Token，请先设置。" };
   }
+  const startedAt = Date.now();
   try {
     const client = new MCPClient({
       baseUrl: MCP_URL,
       token,
       protocolVersion: MCP_PROTOCOL_VERSION,
-      requestTimeoutMs: MCP_REQUEST_TIMEOUT_MS
+      requestTimeoutMs: MCP_REQUEST_TIMEOUT_MS,
+      retryOptions: MCP_RETRY_OPTIONS
     });
     await client.callTool("my-coupons", {});
+    recordMcpSuccess(Date.now() - startedAt);
     return { ok: true };
   } catch (error) {
-    const message = error && error.message ? error.message : String(error);
-    if (isAuthFailureMessage(message)) {
-      return { ok: false, authFailure: true, message };
+    const message = getErrorMessage(error);
+    const elapsedMs = Date.now() - startedAt;
+    const upstreamFailure = isUpstreamError(error);
+    if (upstreamFailure) {
+      recordMcpFailure(error, { statusCode: error.status, latencyMs: elapsedMs });
+      return { ok: false, authFailure: false, message: MCP_UPSTREAM_ERROR_MESSAGE };
     }
-    return { ok: false, authFailure: false, message };
+    recordMcpSuccess(elapsedMs);
+    const safeMessage = sanitizeInlineText(message, { maxLength: 400 });
+    if (isAuthFailureMessage(message)) {
+      return { ok: false, authFailure: true, message: safeMessage };
+    }
+    return { ok: false, authFailure: false, message: safeMessage || "未知错误" };
   }
 }
 
 bot.catch((error, ctx) => {
   console.error("Bot error", error);
-  const message = error && error.message ? error.message : "";
+  const rawMessage = getErrorMessage(error);
+  const message = sanitizeInlineText(rawMessage, { maxLength: 400 });
   const isOldQueryError =
-    message.includes("query is too old") ||
-    message.includes("response timeout expired") ||
+    rawMessage.includes("query is too old") ||
+    rawMessage.includes("response timeout expired") ||
     (error.description && error.description.includes("query is too old"));
   if (!isOldQueryError) {
-    notifyAdmins(`Bot 运行异常：${message}`);
+    notifyAdmins(`Bot 运行异常：${message || "未知错误"}`);
   }
   if (ctx && ctx.reply) {
     ctx.reply("出错了，请稍后再试。");
@@ -1088,18 +1400,33 @@ async function handleAccountCommand(ctx, args) {
   }
 
   if (sub === "add") {
-    const accountId = args[1];
+    const accountId = args[1] ? args[1].trim() : "";
     const token = args.slice(2).join(" ").trim();
     if (!accountId || !token) {
       ctx.reply("用法：/account add 名称 Token");
       return;
     }
-    const validation = await validateToken(token);
-    if (!validation.ok && validation.authFailure) {
-      ctx.reply(`账号 ${accountId} Token 无效或已失效，请重新获取。`);
+    const limit = checkRateLimit(userId, "account_set", ACCOUNT_SET_RATE_LIMIT_MS);
+    if (!limit.ok) {
+      ctx.reply(`操作过于频繁，请 ${Math.ceil(limit.waitMs / 1000)} 秒后再试。`);
       return;
     }
-    const result = addOrUpdateAccount(userId, accountId, token, accountId);
+    const accountCheck = validateAccountIdInput(accountId);
+    if (!accountCheck.ok) {
+      ctx.reply(accountCheck.message);
+      return;
+    }
+    const tokenCheck = validateTokenInput(token);
+    if (!tokenCheck.ok) {
+      ctx.reply(tokenCheck.message);
+      return;
+    }
+    const validation = await validateToken(tokenCheck.value);
+    if (!validation.ok && validation.authFailure) {
+      ctx.reply(`账号 ${accountCheck.value} Token 无效或已失效，请重新获取。`);
+      return;
+    }
+    const result = addOrUpdateAccount(userId, accountCheck.value, tokenCheck.value, accountCheck.value);
     const { existed, isNewAccount } = result;
     if (!validation.ok) {
       ctx.reply(
@@ -1107,9 +1434,9 @@ async function handleAccountCommand(ctx, args) {
       );
       return;
     }
-    ctx.reply(existed ? `账号 ${accountId} 已更新。` : `账号 ${accountId} 已添加。`);
+    ctx.reply(existed ? `账号 ${accountCheck.value} 已更新。` : `账号 ${accountCheck.value} 已添加。`);
     if (isNewAccount) {
-      const info = getAccountInfo(userId, accountId);
+      const info = getAccountInfo(userId, accountCheck.value);
       if (info && info.account.autoClaimEnabled) {
         runImmediateAutoClaim(ctx, info).catch((error) => {
           console.error("Immediate auto-claim failed", error);
@@ -1120,29 +1447,40 @@ async function handleAccountCommand(ctx, args) {
   }
 
   if (sub === "use") {
-    const accountId = args[1];
+    const accountId = args[1] ? args[1].trim() : "";
     if (!accountId) {
       ctx.reply("用法：/account use 名称");
       return;
     }
-    const user = getUser(userId);
-    if (!user || !user.accounts || !user.accounts[accountId]) {
-      ctx.reply(`账号不存在：${accountId}`);
+    const accountCheck = validateAccountIdInput(accountId);
+    if (!accountCheck.ok) {
+      ctx.reply(accountCheck.message);
       return;
     }
-    upsertUser(userId, { activeAccountId: accountId });
-    ctx.reply(`已切换到账号：${getAccountDisplayName(accountId, user.accounts[accountId])}`);
+    const user = getUser(userId);
+    if (!user || !user.accounts || !user.accounts[accountCheck.value]) {
+      ctx.reply(`账号不存在：${sanitizeInlineText(accountCheck.value, { maxLength: 60 })}`);
+      return;
+    }
+    upsertUser(userId, { activeAccountId: accountCheck.value });
+    ctx.reply(`已切换到账号：${getAccountDisplayName(accountCheck.value, user.accounts[accountCheck.value])}`);
     return;
   }
 
   if (sub === "del" || sub === "delete" || sub === "rm") {
-    const accountId = args[1];
+    const accountId = args[1] ? args[1].trim() : "";
     if (!accountId) {
       ctx.reply("用法：/account del 名称");
       return;
     }
-    const removed = removeAccount(userId, accountId);
-    ctx.reply(removed ? `账号 ${accountId} 已删除。` : `账号不存在：${accountId}`);
+    const accountCheck = validateAccountIdInput(accountId);
+    if (!accountCheck.ok) {
+      ctx.reply(accountCheck.message);
+      return;
+    }
+    const removed = removeAccount(userId, accountCheck.value);
+    const safeAccountId = sanitizeInlineText(accountCheck.value, { maxLength: 60 });
+    ctx.reply(removed ? `账号 ${safeAccountId} 已删除。` : `账号不存在：${safeAccountId}`);
     return;
   }
 
@@ -1164,14 +1502,29 @@ bot.command(["token", "settoken"], async (ctx) => {
   }
 
   const userId = String(ctx.from.id);
+  const limit = checkRateLimit(userId, "token_set", TOKEN_SET_RATE_LIMIT_MS);
+  if (!limit.ok) {
+    ctx.reply(`操作过于频繁，请 ${Math.ceil(limit.waitMs / 1000)} 秒后再试。`);
+    return;
+  }
+  const tokenCheck = validateTokenInput(token);
+  if (!tokenCheck.ok) {
+    ctx.reply(tokenCheck.message);
+    return;
+  }
   const user = getUser(userId);
   const accountId = user && user.activeAccountId ? user.activeAccountId : "default";
-  const validation = await validateToken(token);
+  const validation = await validateToken(tokenCheck.value);
   if (!validation.ok && validation.authFailure) {
     ctx.reply("Token 无效或已失效，请重新获取。");
     return;
   }
-  const result = addOrUpdateAccount(userId, accountId, token, accountId === "default" ? "默认账号" : accountId);
+  const result = addOrUpdateAccount(
+    userId,
+    accountId,
+    tokenCheck.value,
+    accountId === "default" ? "默认账号" : accountId
+  );
   const { existed, isNewAccount } = result;
   if (!validation.ok) {
     ctx.reply(`${existed ? "Token 已更新" : "Token 已保存"}，但暂时无法验证：${validation.message}`);
@@ -1218,7 +1571,7 @@ function sendStatus(ctx) {
   const reportSuccessStatus = activeAccount && activeAccount.autoClaimReportSuccess ? "已开启" : "已关闭";
   const reportFailureStatus = activeAccount && activeAccount.autoClaimReportFailure ? "已开启" : "已关闭";
   const lastRun = activeAccount && activeAccount.lastAutoClaimAt ? activeAccount.lastAutoClaimAt : "从未执行";
-  const listText = buildAccountListText(user);
+  const listText = buildAccountListText(user, { includeAutoClaimStatus: true });
 
   ctx.reply(
     [
@@ -1381,6 +1734,14 @@ bot.command("admin", (ctx) => {
       ? `进行中（剩余约 ${burstRemainingMinutes} 分钟，券 ${burstCouponCount} 张，触发 ${burstTriggeredAt}）`
       : "无";
 
+    const mcpHealth = getMcpHealth();
+    const mcpStatus = formatMcpHealthStatus(mcpHealth.status);
+    const mcpLastCheck = formatTimestamp(mcpHealth.lastCheckedAt, AUTO_CLAIM_TIMEZONE);
+    const mcpLastOk = formatTimestamp(mcpHealth.lastOkAt, AUTO_CLAIM_TIMEZONE);
+    const mcpFailures = Number(mcpHealth.consecutiveFailures) || 0;
+    const mcpLastStatusCode = mcpHealth.lastStatusCode || "无";
+    const mcpLastError = mcpHealth.lastError || "无";
+
     const errorPushStatus = isAdminErrorPushEnabled() ? "开" : "关";
     const rerunWindow = AUTO_CLAIM_SPREAD_RERUN_MINUTES
       ? `已执行账号 ${AUTO_CLAIM_SPREAD_RERUN_MINUTES} 分钟后允许重跑`
@@ -1409,6 +1770,8 @@ bot.command("admin", (ctx) => {
         `Sweep 进度：符合 ${lastSweepEligible} ｜已处理 ${lastSweepProcessed} ｜状态 ${autoClaimSweepInProgress ? "运行中" : "空闲"}`,
         `Sweep 错误：${lastSweepError}`,
         `Burst 窗口：${burstStatus}`,
+        `MCP 状态：${mcpStatus}｜最近检查 ${mcpLastCheck}｜最近成功 ${mcpLastOk}｜连续失败 ${mcpFailures}｜状态码 ${mcpLastStatusCode}`,
+        `MCP 最近错误：${mcpLastError}`,
         `报错推送：${errorPushStatus}`,
         `调度配置：检查${AUTO_CLAIM_CHECK_MINUTES}分钟｜起始${AUTO_CLAIM_HOUR}点｜分散${AUTO_CLAIM_SPREAD_MINUTES}分钟｜${rerunWindow}｜每轮上限${AUTO_CLAIM_MAX_PER_SWEEP}｜间隔${AUTO_CLAIM_REQUEST_GAP_MS}ms｜Burst${GLOBAL_BURST_WINDOW_MINUTES}分钟/检查${GLOBAL_BURST_CHECK_SECONDS}s｜时区${AUTO_CLAIM_TIMEZONE}`
       ].join("\n")
@@ -1434,7 +1797,7 @@ bot.command("admin", (ctx) => {
         );
       })
       .catch((error) => {
-        ctx.reply(`手动 Sweep 失败：${error.message}`);
+        ctx.reply(`手动 Sweep 失败：${sanitizeInlineText(getErrorMessage(error), { maxLength: 400 })}`);
       });
     return;
   }
@@ -1477,7 +1840,11 @@ async function sendTelegraphArticle(ctx, title, rawText, fallbackPrefix, cacheKe
     });
   } catch (error) {
     const label = fallbackPrefix || title || "内容";
-    const warning = `${label} Telegraph 生成失败，已改用文本展示：${error.message}`;
+    const safeLabel = sanitizeInlineText(label, { maxLength: 60 });
+    const safeError = sanitizeInlineText(getErrorMessage(error), { maxLength: 200 });
+    const warning = escapeHtml(
+      `${safeLabel} Telegraph 生成失败，已改用文本展示：${safeError || "未知错误"}`
+    );
     await sendLongMessage(ctx, warning + "\n\n" + formatTelegramHtml(stripImagesFromText(rawText)));
   }
 }
@@ -1503,7 +1870,7 @@ async function handleCalendar(ctx, specifiedDate) {
     const cacheKey = getToolCacheKey("campaign-calender", args);
     await sendTelegraphArticle(ctx, title, cleaned, "活动日历", cacheKey);
   } catch (error) {
-    ctx.reply(`活动日历查询失败：${error.message}`);
+    ctx.reply(`活动日历查询失败：${formatMcpErrorMessage(error)}`);
   }
 }
 
@@ -1518,7 +1885,7 @@ async function handleAvailableCoupons(ctx) {
     const cacheKey = getToolCacheKey("available-coupons", {});
     await sendTelegraphArticle(ctx, "麦麦省优惠券列表", cleaned, "优惠券列表", cacheKey);
   } catch (error) {
-    ctx.reply(`优惠券列表查询失败：${error.message}`);
+    ctx.reply(`优惠券列表查询失败：${formatMcpErrorMessage(error)}`);
   }
 }
 
@@ -1537,7 +1904,7 @@ async function handleClaimCoupons(ctx) {
     const text = formatTelegramHtml(stripImagesFromText(simplified));
     await sendLongMessage(ctx, text || "未返回数据。");
   } catch (error) {
-    ctx.reply(`一键领券失败：${error.message}`);
+    ctx.reply(`一键领券失败：${formatMcpErrorMessage(error)}`);
   }
 }
 
@@ -1565,14 +1932,15 @@ async function runImmediateAutoClaim(ctx, info) {
       lastRerunAt: Date.now()
     });
 
+    const safeName = safeHtmlText(info.displayName, { maxLength: 60 });
     const text = [
-      `自动领券结果（${today}）- 账号：${info.displayName}`,
+      `自动领券结果（${today}）- 账号：${safeName}`,
       "",
       formatTelegramHtml(stripImagesFromText(simplified))
     ].join("\n");
     await sendLongMessage(ctx, text || "未返回数据。");
   } catch (error) {
-    const message = error && error.message ? error.message : "未知错误";
+    const message = formatMcpErrorMessage(error);
     const authFailure = isAuthFailureMessage(message);
     const updates = {
       lastAutoClaimDate: today,
@@ -1601,7 +1969,7 @@ async function handleMyCoupons(ctx) {
     const text = formatTelegramHtml(stripImagesFromText(normalized));
     await sendLongMessage(ctx, text || "未返回数据。");
   } catch (error) {
-    ctx.reply(`我的优惠券查询失败：${error.message}`);
+    ctx.reply(`我的优惠券查询失败：${formatMcpErrorMessage(error)}`);
   }
 }
 
@@ -1658,10 +2026,18 @@ bot.command("mycoupons", async (ctx) => {
 bot.command("autoclaim", (ctx) => {
   const args = parseCommandArgs(ctx);
   const setting = args[0] ? args[0].toLowerCase() : "";
-  const accountId = args[1];
+  let accountId = args[1] ? args[1].trim() : "";
   if (!setting || (setting !== "on" && setting !== "off")) {
     ctx.reply("用法：/autoclaim on|off [账号名]");
     return;
+  }
+  if (accountId) {
+    const accountCheck = validateAccountIdInput(accountId);
+    if (!accountCheck.ok) {
+      ctx.reply(accountCheck.message);
+      return;
+    }
+    accountId = accountCheck.value;
   }
 
   handleAutoClaimSetting(ctx, setting === "on", accountId);
@@ -1687,6 +2063,14 @@ bot.command("autoclaimreport", (ctx) => {
   if (!setting || (setting !== "on" && setting !== "off")) {
     ctx.reply("用法：/autoclaimreport success|fail on|off [账号名]");
     return;
+  }
+  if (accountId) {
+    const accountCheck = validateAccountIdInput(accountId.trim());
+    if (!accountCheck.ok) {
+      ctx.reply(accountCheck.message);
+      return;
+    }
+    accountId = accountCheck.value;
   }
 
   handleAutoClaimReportSetting(ctx, type, setting === "on", accountId);
@@ -1764,6 +2148,7 @@ bot.action("menu_token_help", async (ctx) => {
 
 const autoClaimInProgress = new Set();
 let autoClaimSweepInProgress = false;
+let mcpHealthCheckInProgress = false;
 
 function hashString(input) {
   let hash = 0;
@@ -1775,6 +2160,77 @@ function hashString(input) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function probeMcpEndpoint() {
+  const controller = new AbortController();
+  let timeoutId = null;
+  if (MCP_HEALTH_CHECK_TIMEOUT_MS > 0) {
+    timeoutId = setTimeout(() => controller.abort(), MCP_HEALTH_CHECK_TIMEOUT_MS);
+  }
+  const startedAt = Date.now();
+  try {
+    const response = await fetch(MCP_URL, {
+      method: "HEAD",
+      signal: controller.signal
+    });
+    const latencyMs = Date.now() - startedAt;
+    return {
+      ok: response.status < 500,
+      status: response.status,
+      latencyMs
+    };
+  } catch (error) {
+    const latencyMs = Date.now() - startedAt;
+    if (error && error.name === "AbortError") {
+      const timeoutError = new Error("MCP health check timed out");
+      timeoutError.code = "MCP_TIMEOUT";
+      timeoutError.isTimeout = true;
+      return { ok: false, status: 0, latencyMs, error: timeoutError };
+    }
+    return { ok: false, status: 0, latencyMs, error };
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+async function runMcpHealthCheck() {
+  if (mcpHealthCheckInProgress) {
+    return;
+  }
+  mcpHealthCheckInProgress = true;
+  try {
+    const result = await probeMcpEndpoint();
+    if (result.ok) {
+      recordMcpSuccess(result.latencyMs, { statusCode: result.status });
+      return;
+    }
+    const error =
+      result.error ||
+      new Error(result.status ? `MCP health check failed (${result.status})` : "MCP health check failed");
+    recordMcpFailure(error, { statusCode: result.status, latencyMs: result.latencyMs });
+  } catch (error) {
+    recordMcpFailure(error, { statusCode: 0, latencyMs: 0 });
+  } finally {
+    mcpHealthCheckInProgress = false;
+  }
+}
+
+function startMcpHealthMonitor() {
+  if (!MCP_HEALTH_CHECK_INTERVAL_MS || MCP_HEALTH_CHECK_INTERVAL_MS <= 0) {
+    console.log("MCP health monitor disabled: MCP_HEALTH_CHECK_INTERVAL_MS <= 0.");
+    return;
+  }
+  console.log(`MCP health monitor started: every ${MCP_HEALTH_CHECK_INTERVAL_MS} ms.`);
+  const trigger = () => {
+    runMcpHealthCheck().catch((error) => {
+      console.error("MCP health check failed", error);
+    });
+  };
+  trigger();
+  mcpHealthInterval = setInterval(trigger, MCP_HEALTH_CHECK_INTERVAL_MS);
 }
 
 function getDailyTargetMinute(userId, accountId, today) {
@@ -1852,7 +2308,7 @@ function ensureBurstScheduler(enabled) {
   burstInterval = setInterval(() => {
     runAutoClaimSweep().catch((error) => {
       console.error("Burst auto-claim sweep failed", error);
-      notifyAdmins(`Burst 自动领券调度异常：${error.message}`);
+      notifyAdmins(`Burst 自动领券调度异常：${sanitizeInlineText(getErrorMessage(error), { maxLength: 400 })}`);
     });
   }, GLOBAL_BURST_CHECK_SECONDS * 1000);
 }
@@ -2015,8 +2471,9 @@ async function runAutoClaimSweep() {
         });
         incrementUserStats(task.userId, { autoClaimRuns: 1, couponsClaimed: claimedCount });
 
+        const safeDisplayName = safeHtmlText(task.displayName, { maxLength: 60 });
         const message = [
-          `自动领券结果（${today}）- 账号：${task.displayName}`,
+          `自动领券结果（${today}）- 账号：${safeDisplayName}`,
           "",
           formatTelegramHtml(stripImagesFromText(simplified))
         ].join("\n");
@@ -2035,13 +2492,14 @@ async function runAutoClaimSweep() {
           lastRerunAt: Date.now()
         });
       } catch (error) {
-        const authFailure = isAuthFailureMessage(error && error.message ? error.message : "");
+        const safeMessage = formatMcpErrorMessage(error);
+        const authFailure = isAuthFailureMessage(safeMessage);
         const shouldNotifyAuthFailure =
           authFailure && task.account.lastAuthFailureNotifiedDate !== today;
         const accountUpdates = {
           lastAutoClaimDate: today,
           lastAutoClaimAt: getLocalDateTime(AUTO_CLAIM_TIMEZONE),
-          lastAutoClaimStatus: `失败：${error.message}`,
+          lastAutoClaimStatus: `失败：${safeMessage}`,
           lastBurstId: task.reason === "burst" ? burst.id : task.account.lastBurstId,
           lastRerunAt: Date.now()
         };
@@ -2052,10 +2510,10 @@ async function runAutoClaimSweep() {
           ...accountUpdates
         });
 
-        sweepError = error.message || sweepError;
-        logAutoClaim(`Auto-claim failed: account=${task.displayName}, error=${error.message}`);
+        sweepError = safeMessage || sweepError;
+        logAutoClaim(`Auto-claim failed: account=${task.displayName}, error=${safeMessage}`);
         await notifyAdmins(
-          `自动领券失败（${today}）- Token：${task.account.token}\n原因：${error.message}`
+          `自动领券失败（${today}）- Token：${maskToken(task.account.token)}\n原因：${safeMessage}`
         );
 
         if (authFailure) {
@@ -2064,7 +2522,7 @@ async function runAutoClaimSweep() {
               await sendLongMessageToUser(
                 task.userId,
                 [
-                  `自动领券失败（${today}）- 账号：${task.displayName}`,
+                  `自动领券失败（${today}）- 账号：${safeHtmlText(task.displayName, { maxLength: 60 })}`,
                   "原因：鉴权失败，Token 已失效，请更新 Token。",
                   "可使用 /token 或 /account add 重新设置。"
                 ].join("\n")
@@ -2077,7 +2535,10 @@ async function runAutoClaimSweep() {
           try {
             await sendLongMessageToUser(
               task.userId,
-              `自动领券失败（${today}）- 账号：${task.displayName}\n${error.message}`
+              `自动领券失败（${today}）- 账号：${safeHtmlText(task.displayName, { maxLength: 60 })}\n${safeHtmlText(
+                safeMessage,
+                { maxLength: 400 }
+              )}`
             );
           } catch (sendError) {
             console.error("Failed to send auto-claim error to user", sendError);
@@ -2090,7 +2551,7 @@ async function runAutoClaimSweep() {
       }
     }
   } catch (error) {
-    sweepError = error && error.message ? error.message : "未知错误";
+    sweepError = sanitizeInlineText(getErrorMessage(error), { maxLength: 400 }) || "未知错误";
     throw error;
   } finally {
     const finishedAt = Date.now();
@@ -2120,7 +2581,7 @@ function startAutoClaimScheduler() {
     logAutoClaimDebug("Scheduler trigger fired.");
     runAutoClaimSweep().catch((error) => {
       console.error("Auto-claim sweep failed", error);
-      notifyAdmins(`自动领券调度异常：${error.message}`);
+      notifyAdmins(`自动领券调度异常：${sanitizeInlineText(getErrorMessage(error), { maxLength: 400 })}`);
     });
   };
   trigger();
@@ -2147,7 +2608,7 @@ function startSweepWatchdog() {
       logAutoClaim("Sweep watchdog triggered: scheduler stale, running sweep.");
       runAutoClaimSweep().catch((error) => {
         console.error("Sweep watchdog failed to trigger sweep", error);
-        notifyAdmins(`Sweep watchdog异常：${error.message}`);
+        notifyAdmins(`Sweep watchdog异常：${sanitizeInlineText(getErrorMessage(error), { maxLength: 400 })}`);
       });
     }
   };
@@ -2155,6 +2616,7 @@ function startSweepWatchdog() {
   watchdogInterval = setInterval(check, SWEEP_WATCHDOG_SECONDS * 1000);
 }
 
+startMcpHealthMonitor();
 startAutoClaimScheduler();
 startSweepWatchdog();
 
@@ -2196,6 +2658,10 @@ function shutdown(signal) {
   if (watchdogInterval) {
     clearInterval(watchdogInterval);
     watchdogInterval = null;
+  }
+  if (mcpHealthInterval) {
+    clearInterval(mcpHealthInterval);
+    mcpHealthInterval = null;
   }
   bot.stop(signal);
 }
