@@ -59,6 +59,7 @@ See `.env.example` for all options. Key variables:
 
 - `MCD_MCP_URL` (default: `https://mcp.mcd.cn/mcp-servers/mcd-mcp`)
 - `MCP_REQUEST_TIMEOUT_MS` (default: `30000`)
+- `MCP_CLIENT_CACHE_TTL_SECONDS` (default: `1800`)
 - `MCP_RETRY_MAX` (default: `2`)
 - `MCP_RETRY_BASE_DELAY_MS` (default: `500`)
 - `MCP_RETRY_MAX_DELAY_MS` (default: `5000`)
@@ -69,7 +70,7 @@ See `.env.example` for all options. Key variables:
 - `MCP_HEALTH_CHECK_INTERVAL_MS` (default: `60000`)
 - `MCP_HEALTH_CHECK_TIMEOUT_MS` (default: `5000`)
 - `MCP_HEALTH_FAILURE_THRESHOLD` (default: `2`)
-- `MCP_UPSTREAM_ERROR_MESSAGE` (default: `上游故障`)
+- `MCP_UPSTREAM_ERROR_MESSAGE` (default: Chinese "upstream error")
 - `ACCOUNT_ID_MIN_LENGTH` (default: `1`)
 - `ACCOUNT_ID_MAX_LENGTH` (default: `32`)
 - `TOKEN_MIN_LENGTH` (default: `16`)

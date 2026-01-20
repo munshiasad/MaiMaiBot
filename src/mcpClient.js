@@ -115,6 +115,7 @@ class MCPClient {
     };
     this.sessionId = null;
     this.initialized = false;
+    this.initializing = null;
     this.nextRequestId = 1;
   }
 
@@ -149,40 +150,52 @@ class MCPClient {
     if (this.initialized) {
       return;
     }
+    if (this.initializing) {
+      await this.initializing;
+      return;
+    }
 
-    const initMessage = {
-      jsonrpc: "2.0",
-      id: this._nextId(),
-      method: "initialize",
-      params: {
-        protocolVersion: this.protocolVersion,
-        capabilities: {},
-        clientInfo: this.clientInfo
+    this.initializing = (async () => {
+      const initMessage = {
+        jsonrpc: "2.0",
+        id: this._nextId(),
+        method: "initialize",
+        params: {
+          protocolVersion: this.protocolVersion,
+          capabilities: {},
+          clientInfo: this.clientInfo
+        }
+      };
+
+      const response = await this._sendRpc(initMessage, {
+        expectResponse: true
+      });
+
+      if (!response || response.error) {
+        const message = response && response.error && response.error.message
+          ? response.error.message
+          : "Failed to initialize MCP session";
+        throw new Error(message);
       }
-    };
 
-    const response = await this._sendRpc(initMessage, {
-      expectResponse: true
-    });
+      if (response.result && response.result.protocolVersion) {
+        this.protocolVersion = response.result.protocolVersion;
+      }
 
-    if (!response || response.error) {
-      const message = response && response.error && response.error.message
-        ? response.error.message
-        : "Failed to initialize MCP session";
-      throw new Error(message);
+      const initializedNotification = {
+        jsonrpc: "2.0",
+        method: "notifications/initialized"
+      };
+
+      await this._sendRpc(initializedNotification, { expectResponse: false });
+      this.initialized = true;
+    })();
+
+    try {
+      await this.initializing;
+    } finally {
+      this.initializing = null;
     }
-
-    if (response.result && response.result.protocolVersion) {
-      this.protocolVersion = response.result.protocolVersion;
-    }
-
-    const initializedNotification = {
-      jsonrpc: "2.0",
-      method: "notifications/initialized"
-    };
-
-    await this._sendRpc(initializedNotification, { expectResponse: false });
-    this.initialized = true;
   }
 
   _nextId() {

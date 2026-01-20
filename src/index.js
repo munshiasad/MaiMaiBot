@@ -88,6 +88,7 @@ if (!BOT_TOKEN) {
 const MCP_URL = process.env.MCD_MCP_URL || "https://mcp.mcd.cn/mcp-servers/mcd-mcp";
 const MCP_PROTOCOL_VERSION = process.env.MCP_PROTOCOL_VERSION || "2025-06-18";
 const MCP_REQUEST_TIMEOUT_MS = readNumberEnv("MCP_REQUEST_TIMEOUT_MS", 30000, { min: 0 });
+const MCP_CLIENT_CACHE_TTL_SECONDS = readNumberEnv("MCP_CLIENT_CACHE_TTL_SECONDS", 1800, { min: 0 });
 const MCP_RETRY_MAX = readNumberEnv("MCP_RETRY_MAX", 2, { min: 0 });
 const MCP_RETRY_BASE_DELAY_MS = readNumberEnv("MCP_RETRY_BASE_DELAY_MS", 500, { min: 0 });
 const MCP_RETRY_MAX_DELAY_MS = readNumberEnv("MCP_RETRY_MAX_DELAY_MS", 5000, { min: 0 });
@@ -144,6 +145,8 @@ const ADMIN_TELEGRAM_IDS = new Set(
 
 const cache = new TTLCache(CACHE_TTL_SECONDS * 1000);
 const telegraphCache = new TTLCache(CACHE_TTL_SECONDS * 1000);
+const mcpClientCache =
+  MCP_CLIENT_CACHE_TTL_SECONDS > 0 ? new TTLCache(MCP_CLIENT_CACHE_TTL_SECONDS * 1000) : null;
 const bot = new Telegraf(BOT_TOKEN);
 let autoClaimInterval = null;
 let burstInterval = null;
@@ -1247,6 +1250,30 @@ function getToolCacheKey(toolName, args) {
   return `${toolName}:${JSON.stringify(args || {})}`;
 }
 
+function buildMcpClient(token) {
+  return new MCPClient({
+    baseUrl: MCP_URL,
+    token,
+    protocolVersion: MCP_PROTOCOL_VERSION,
+    requestTimeoutMs: MCP_REQUEST_TIMEOUT_MS,
+    retryOptions: MCP_RETRY_OPTIONS
+  });
+}
+
+function getMcpClient(token) {
+  if (!mcpClientCache) {
+    return buildMcpClient(token);
+  }
+  const key = `${MCP_URL}:${token}`;
+  const cached = mcpClientCache.get(key);
+  if (cached) {
+    return cached;
+  }
+  const client = buildMcpClient(token);
+  mcpClientCache.set(key, client);
+  return client;
+}
+
 async function callToolWithToken(token, toolName, args) {
   if (!token) {
     throw new Error("缺少 MCP Token，请先设置。");
@@ -1261,13 +1288,7 @@ async function callToolWithToken(token, toolName, args) {
     }
   }
 
-  const client = new MCPClient({
-    baseUrl: MCP_URL,
-    token,
-    protocolVersion: MCP_PROTOCOL_VERSION,
-    requestTimeoutMs: MCP_REQUEST_TIMEOUT_MS,
-    retryOptions: MCP_RETRY_OPTIONS
-  });
+  const client = getMcpClient(token);
 
   const startedAt = Date.now();
   try {
@@ -1304,13 +1325,7 @@ async function validateToken(token) {
   }
   const startedAt = Date.now();
   try {
-    const client = new MCPClient({
-      baseUrl: MCP_URL,
-      token,
-      protocolVersion: MCP_PROTOCOL_VERSION,
-      requestTimeoutMs: MCP_REQUEST_TIMEOUT_MS,
-      retryOptions: MCP_RETRY_OPTIONS
-    });
+    const client = getMcpClient(token);
     await client.callTool("my-coupons", {});
     recordMcpSuccess(Date.now() - startedAt);
     return { ok: true };
